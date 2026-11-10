@@ -10,13 +10,13 @@ export async function finishTrailer(directory, manifest, ffmpeg = process.env.FF
   const frames = expectedFrames(manifest);
   if (manifest.frameCount !== frames) throw new Error(`Picture frame count ${manifest.frameCount}; expected ${frames}`);
   const audio = path.join(directory, 'audio');
-  try { await requireFiles(directory, ['audio/worlds-awaken.wav', 'audio/effects.wav']); }
+  try { await requireFiles(directory, ['audio/worlds-rising.wav', 'audio/effects.wav']); }
   catch { await run(process.execPath, ['scripts/compose_trailer.mjs', audio]); }
   const loudness = await mixTrailer(audio, ffmpeg);
-  await run(ffmpeg, ['-hide_banner', '-loglevel', 'warning', '-y', '-i', path.join(directory, 'video/worlds-release-picture.ivf'), '-i', path.join(audio, 'trailer-final-mix.wav'), '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'libx264', '-preset', 'slow', '-crf', '23', '-maxrate', '7M', '-bufsize', '14M', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-t', String(manifest.duration), '-movflags', '+faststart', '-metadata', 'title=Worlds — November 2026 Release Trailer', '-metadata', 'comment=Original score: Worlds Awaken. Staged in-engine cinematic.', path.join(directory, videoFile)]);
+  await run(ffmpeg, ['-hide_banner', '-loglevel', 'warning', '-y', '-i', path.join(directory, 'video/worlds-release-picture.ivf'), '-i', path.join(audio, 'trailer-final-mix.wav'), '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'libx264', '-preset', 'slow', '-crf', '26', '-maxrate', '6M', '-bufsize', '12M', '-x264-params', 'aq-mode=3', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-t', String(manifest.duration), '-movflags', '+faststart', '-metadata', 'title=Worlds — Release Trailer', '-metadata', 'comment=Original score: Worlds Rising. Staged in-engine cinematic.', path.join(directory, videoFile)]);
   // Effects and the other stems are mastering inputs retained in cloud storage;
   // the downloadable manifest names only final audio deliverables.
-  Object.assign(manifest, { loudness, video: videoFile, audio: { music: 'audio/worlds-awaken.wav', listening: 'audio/worlds-awaken.m4a', mix: 'audio/trailer-final-mix.wav' } });
+  Object.assign(manifest, { loudness, video: videoFile, audio: { music: 'audio/worlds-rising.wav', listening: 'audio/worlds-rising.m4a', mix: 'audio/trailer-final-mix.wav' } });
   await writeFile(path.join(directory, 'manifest.json'), JSON.stringify(manifest, null, 2));
   await writeGallery(directory, manifest);
   return manifest;

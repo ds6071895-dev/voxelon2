@@ -45,6 +45,8 @@ interface ChunkShaderUniforms {
   arenaBounds: { value: THREE.Vector4 };
   /** Ambient light floor inside an arena; 0 disables it. */
   arenaLight: { value: number };
+  /** 0 = the moody 80%-per-level ramp, 1 = Minecraft's default-brightness ramp. */
+  lightCurve: { value: number };
   /** Direct radiance of the casting body (sun by day, moon by night) at the
    *  ground, already reddened by the air it crossed. See sky.ts. */
   sunTint: { value: THREE.Color };
@@ -77,6 +79,7 @@ const CHUNK_COMMON = /* glsl */`
 uniform float uAuroraLight;
 uniform vec4 uArenaBounds;
 uniform float uArenaLight;
+uniform float uLightCurve;
 uniform vec3 uSunTint;
 uniform vec3 uSkyTint;
 uniform float uTime;
@@ -174,6 +177,17 @@ vec3 voxFaceNormal() {
 ${DISPLAY_KNEE_GLSL}
 
 float voxLuma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+/** Light level (0-1) to brightness. Moody: every level is 80% of the one
+ *  above. Bright: Minecraft's lightmap curve at its default 50% brightness
+ *  (f / (4 - 3f), half lifted by the gamma slider's 1 - (1 - x)^4), which
+ *  keeps a window-lit room at about three quarters of daylight instead of half. */
+float voxLightRamp(float lv) {
+  float moody = pow(0.8, 15.0 * (1.0 - lv));
+  if (uLightCurve < 0.5) return moody;
+  float c = lv / (4.0 - 3.0 * lv);
+  float lifted = 1.0 - pow(1.0 - c, 4.0);
+  return max(mix(c, lifted, 0.5), moody);
+}
 `;
 
 /**
@@ -246,6 +260,7 @@ function applyLightShader(
     shader.uniforms.uAuroraLight = u.aurora;
     shader.uniforms.uArenaBounds = u.arenaBounds;
     shader.uniforms.uArenaLight = u.arenaLight;
+    shader.uniforms.uLightCurve = u.lightCurve;
     shader.uniforms.uSunTint = u.sunTint;
     shader.uniforms.uSkyTint = u.skyTint;
     shader.uniforms.uTime = u.time;
@@ -332,9 +347,8 @@ function applyLightShader(
       float skyLv = vSkyBlock.x;
       if (uArenaLight > 0.0) skyLv = max(skyLv, uArenaLight);
       float blkLv = vSkyBlock.y;
-      // The vanilla perceptual ramp: every level is 80% of the one above.
-      float skyK = pow(0.8, 15.0 * (1.0 - skyLv));
-      float blkK = pow(0.8, 15.0 * (1.0 - blkLv));
+      float skyK = voxLightRamp(skyLv);
+      float blkK = voxLightRamp(blkLv);
 
       // Direct light. Only cells open to the sky see the sun at all; the
       // shadow map then decides what is actually in the way.
@@ -482,6 +496,8 @@ export class World {
   readonly arenaBoundsUniform = { value: new THREE.Vector4(1, 1, 0, 0) };
   /** Ambient light floor inside the cropped arena; 0 when there is no crop. */
   readonly arenaLightUniform = { value: 0 };
+  /** Which light ramp the arena uses (see voxLightRamp); 0 outside arenas. */
+  readonly lightCurveUniform = { value: 0 };
   /** Seconds since load, driving water, foliage and flicker. */
   readonly timeUniform = { value: 0 };
   /** Unit vector toward the body that is lighting the world. */
@@ -562,6 +578,7 @@ export class World {
     const shaderUniforms: ChunkShaderUniforms = {
       aurora: this.auroraUniform,
       arenaBounds: this.arenaBoundsUniform, arenaLight: this.arenaLightUniform,
+      lightCurve: this.lightCurveUniform,
       sunTint: this.sunTintUniform,
       skyTint: this.skyTintUniform, time: this.timeUniform,
       lightDir: this.lightDirUniform, sunDir: this.sunDirUniform,
@@ -595,6 +612,9 @@ export class World {
     this.gen = gen;
   }
 
+  /** Footprint of the current world (chunks outside it are empty air). */
+  get bounds(): { minX: number; minZ: number; maxX: number; maxZ: number } { return this.gen.bounds; }
+
   getChunk(cx: number, cz: number): Chunk | undefined {
     return this.chunks.get(Chunk.key(cx, cz));
   }
@@ -626,14 +646,17 @@ export class World {
 
   /** Hide all terrain outside one temporary minigame arena, including geometry
    * sharing a chunk mesh with its walls, and apply that mode's ambient floor.
-   * Passing null turns the crop off (the title backdrop, the menus). */
+   * Passing null turns the crop off (the title backdrop, the menus).
+   * `brightCurve` swaps the moody light ramp for Minecraft's default-brightness
+   * one, so rooms lit through a window read as lit rather than as a cave. */
   setArenaRenderBounds(
     bounds: { minX: number; minZ: number; maxX: number; maxZ: number } | null,
-    ambientFloor = 0,
+    ambientFloor = 0, brightCurve = false,
   ): void {
     if (bounds) this.arenaBoundsUniform.value.set(bounds.minX, bounds.minZ, bounds.maxX, bounds.maxZ);
     else this.arenaBoundsUniform.value.set(1, 1, 0, 0);
     this.arenaLightUniform.value = bounds ? ambientFloor : 0;
+    this.lightCurveUniform.value = bounds && brightCurve ? 1 : 0;
     for (const chunk of this.chunks.values()) this.refreshCrop(chunk);
   }
 

@@ -15,13 +15,18 @@ import { parkourTheme } from '../parkour_themes';
 import { buildAvatarBody, type AvatarBody } from '../avatar';
 import { defaultCosmetics } from '../character';
 import { createAvatarEquipment, createAvatarItemMaterial, attachAvatarEquipment, poseAvatar, type AvatarEquipment } from '../avatar_equipment';
-import { itemGeometry, itemGeometrySolid } from '../item_geometry';
 import { ITEMS } from '../items';
 import { createRatModel, createCheeseModel, createCatModel, type RatModel, type CatModel } from '../ratseek_models';
+import { buildMob, animateMob, type MobRig } from '../vanilla/client/mob_models';
+import type { EntityView } from '../vanilla/messages';
 import { configureCaptureQuality, sizeCapture, loadCaptureChunks } from '../media/offline';
 import { warmCaptureDragon } from '../media/dragon';
-import { createTrailerCourse, trailerShotContext, trailerFrame, trailerEdits, trailerEvents, trailerDragonCue, captureSmooth as smooth, type StageFrame, type StageEdit, type StageEvent } from './staging';
-import { SHOTS, SCREENSHOTS, RELEASE, DURATION, type Shot } from './shots';
+import {
+  createTrailerCourse, trailerShotContext, trailerFrame, trailerEdits, trailerEvents, trailerDragonCue, trailerWorld, trailerFocus, useTrailerLake,
+  captureSmooth as smooth, type StageFrame, type StageEdit, type StageEvent,
+} from './staging';
+import { createCape, wearCape, type Cape, type CapeTier } from './cape';
+import { SHOTS, SCREENSHOTS, HERO_FRAMES, RELEASE, RPG, DURATION, type Shot } from './shots';
 
 const params = new URLSearchParams(location.search);
 const capture = params.has('capture');
@@ -36,11 +41,26 @@ scene.fog = new THREE.Fog(0xb7d3ee, 90, 180);
 const camera = new THREE.PerspectiveCamera(58, 16 / 9, .08, 2000);
 const atlas = createAtlas(TEXTURE_SEED, renderer.capabilities.getMaxAnisotropy());
 const lake = new TitleTerrain(0x5ca1ab1e);
+useTrailerLake(lake);
 let generator = lake as WorldGenerator;
 const world = new World(scene, atlas, generator);
 world.setSmoothLighting(true);
 const sky = new Sky(scene, TEXTURE_SEED);
 sky.setShaders(true);
+// Lucky Pillars hangs over the void: looking down, show a clear poster-blue
+// backdrop (as the title card does) instead of the atmosphere's grey haze.
+const voidSky = new THREE.Mesh(new THREE.SphereGeometry(900, 32, 16), new THREE.ShaderMaterial({
+  uniforms: { top: { value: new THREE.Color(0x69b7ef) }, horizon: { value: new THREE.Color(0xc4e5fa) }, bottom: { value: new THREE.Color(0x80bce8) } },
+  vertexShader: 'varying float height; void main() { height = normalize(position).y; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `uniform vec3 top; uniform vec3 horizon; uniform vec3 bottom; varying float height;
+    void main() { vec3 c = height > 0.0 ? mix(horizon, top, smoothstep(0.0, 0.65, height)) : mix(horizon, bottom, smoothstep(0.0, 0.65, -height));
+      gl_FragColor = vec4(c, 1.0);
+      #include <colorspace_fragment>
+    }`,
+  side: THREE.BackSide, depthWrite: false, fog: false,
+}));
+voidSky.frustumCulled = false; voidSky.renderOrder = -99; voidSky.visible = false;
+scene.add(voidSky);
 const postfx = new PostFX(renderer, scene);
 const shadows = new SunShadow(renderer, scene, atlas.texture, world.shadowUniforms);
 const effects = params.get('quality') !== 'high';
@@ -56,9 +76,11 @@ const { seed, course } = createTrailerCourse();
 const CAST: { seed: number; shirt: number }[] = [
   { seed: 300, shirt: 0xd9393f }, { seed: 671, shirt: 0x2f6fe0 }, { seed: 1042, shirt: 0xe8c22c }, { seed: 1213, shirt: 0xd9393f },
   { seed: 77, shirt: 0x2f6fe0 }, { seed: 2718, shirt: 0x8b5cf6 }, { seed: 905, shirt: 0x37a845 },
+  // The cape hero, then the four tier models.
+  { seed: 4242, shirt: 0x1f2a44 }, { seed: 515, shirt: 0x5b6b7d }, { seed: 1888, shirt: 0x2b5ea8 }, { seed: 3301, shirt: 0x5a3a8c }, { seed: 6160, shirt: 0x7a1f2a },
 ];
 const itemMat = createAvatarItemMaterial(atlas);
-interface Actor { body: AvatarBody; pivot: THREE.Group; equipment: AvatarEquipment | null; item: number; flash: THREE.Mesh | null }
+interface Actor { body: AvatarBody; pivot: THREE.Group; equipment: AvatarEquipment | null; item: number; flash: THREE.Mesh | null; cape: Cape | null }
 const flashMat = new THREE.MeshBasicMaterial({ color: 0xffe9a8 });
 const flashGeo = new THREE.IcosahedronGeometry(.07, 0);
 const actors: Actor[] = CAST.map(c => {
@@ -67,7 +89,7 @@ const actors: Actor[] = CAST.map(c => {
   pivot.add(body.group); body.group.position.y = -.9;
   pivot.visible = false;
   scene.add(pivot);
-  return { body, pivot, equipment: null, item: -1, flash: null };
+  return { body, pivot, equipment: null, item: -1, flash: null, cape: null };
 });
 const rats: RatModel[] = [createRatModel(), createRatModel(), createRatModel(true)];
 rats.forEach(r => scene.add(r.group));
@@ -83,7 +105,50 @@ const arrow = new THREE.Group();
   tip.position.z = -.44;
   arrow.add(shaft, tip); arrow.visible = false; scene.add(arrow);
 }
-const dropMeshes: THREE.Mesh[] = [];
+// Floating loot: the shared held-item model, centred on a spinning pivot.
+const dropPivots: { pivot: THREE.Group; item: number; equipment: AvatarEquipment | null }[] = [];
+function dropPivot(i: number, item: number): THREE.Group {
+  let d = dropPivots[i];
+  if (!d) { d = { pivot: new THREE.Group(), item: -1, equipment: null }; scene.add(d.pivot); dropPivots[i] = d; }
+  if (d.item !== item) {
+    d.equipment?.dispose();
+    d.item = item;
+    d.equipment = createAvatarEquipment(atlas, item, itemMat);
+    if (d.equipment) {
+      const root = d.equipment.root;
+      root.position.set(0, 0, 0); root.rotation.set(0, 0, 0); root.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(root), c = box.getCenter(new THREE.Vector3());
+      root.position.sub(c);
+      d.pivot.add(root);
+    }
+  }
+  return d.pivot;
+}
+// Disaster City's horde: the vanilla client's own zombie model and animation.
+const zombies: MobRig[] = Array.from({ length: 8 }, (_, i) => {
+  const group = new THREE.Group();
+  const rig: MobRig = { id: 900 + i, kind: 'zombie', group, yaw: 0, flags: 0, age: 0, legs: [], arms: [], walk: 0, hurtUntil: 0 };
+  buildMob(rig, { id: rig.id, kind: 'zombie', x: 0, y: 0, z: 0, yaw: 0, flags: 0 } as EntityView);
+  group.visible = false;
+  scene.add(group);
+  return rig;
+});
+function tintZombies(k: number): void {
+  for (const z of zombies) z.mats?.forEach(m => m.color.setScalar(k));
+}
+// Meteors: a glowing magma lump inside a soft additive halo.
+const meteorCore = new THREE.MeshBasicMaterial({ color: 0xff8a2a });
+const meteorHot = new THREE.MeshBasicMaterial({ color: 0xffe0a0 });
+const meteorHalo = new THREE.MeshBasicMaterial({ color: 0xff7a20, transparent: true, opacity: .35, blending: THREE.AdditiveBlending, depthWrite: false, fog: false });
+const meteors = Array.from({ length: 3 }, () => {
+  const g = new THREE.Group();
+  const core = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), meteorCore);
+  const hot = new THREE.Mesh(new THREE.BoxGeometry(.62, .62, .62), meteorHot);
+  hot.position.set(.25, .25, .25);
+  const halo = new THREE.Mesh(new THREE.IcosahedronGeometry(1.2, 1), meteorHalo);
+  g.add(core, hot, halo); g.visible = false; scene.add(g);
+  return g;
+});
 
 // ── logo, reel posters ───────────────────────────────────────────────────
 const logo = new Image();
@@ -101,17 +166,28 @@ async function loadLogo(): Promise<void> {
   URL.revokeObjectURL(logoURL);
 }
 const POSTERS = [
-  { id: 'bridge', name: 'THE BRIDGE', accent: '#4da3ff' },
-  { id: 'duels', name: 'DUELS', accent: '#ffb347' }, { id: 'parkour', name: 'PARKOUR', accent: '#46d6a5' },
-  { id: 'ratseek', name: 'RAT AND SEEK', accent: '#c58cff' },
+  { id: 'pillars', name: 'LUCKY PILLARS', accent: '#e0a91b', focus: .45 },
+  { id: 'disaster', name: 'DISASTER CITY', accent: '#dc5a24', focus: .5 },
+  { id: 'minigames', name: 'PARTY GAMES', accent: '#ec4899', focus: .5 },
+  { id: 'bridge', name: 'THE BRIDGE', accent: '#4da3ff', focus: .5 },
+  { id: 'duels', name: 'DUELS', accent: '#ffb347', focus: .5 },
+  { id: 'parkour', name: 'PARKOUR', accent: '#46d6a5', focus: .5 },
+  { id: 'ratseek', name: 'RAT AND SEEK', accent: '#c58cff', focus: .5 },
 ].map(p => ({ ...p, image: new Image() }));
 async function loadPosters(): Promise<void> {
   await Promise.all(POSTERS.map(async p => { p.image.src = `/cards/${p.id}.webp`; await p.image.decode(); }));
 }
 const ACCENT: Record<string, string> = {
-  bridge: '#4da3ff', duel: '#ffb347', parkour: '#46d6a5', manor: '#c58cff', lake: '#ffffff',
+  pillars: '#f2b824', disaster: '#ff6a2c', whack: '#ff5fae', tnt: '#ff5fae', podium: '#ff5fae',
+  bridge: '#4da3ff', duel: '#ffb347', parkour: '#46d6a5', manor: '#c58cff', lake: '#ffffff', rpg: '#ffffff',
 };
-const GAME_NAME: Record<string, string> = { bridge: 'THE BRIDGE', duel: 'DUELS', parkour: 'PARKOUR', manor: 'RAT AND SEEK' };
+const GAME_NAME: Record<string, string> = {
+  pillars: 'LUCKY PILLARS', disaster: 'DISASTER CITY', whack: 'PARTY GAMES', tnt: 'PARTY GAMES', podium: 'PARTY GAMES',
+  bridge: 'THE BRIDGE', duel: 'DUELS', parkour: 'PARKOUR', manor: 'RAT AND SEEK',
+};
+const TIER_LABEL: { name: string; color: string }[] = [
+  { name: 'COMMON', color: '#c9d3df' }, { name: 'RARE', color: '#6fb0ff' }, { name: 'EPIC', color: '#c59bff' }, { name: 'LEGENDARY', color: '#ffd35c' },
+];
 
 // ── clock and state ─────────────────────────────────────────────────────
 let shotIndex = -1;
@@ -139,9 +215,37 @@ function resize(w: number, h: number): void {
 }
 resize(Number(params.get('width')) || 1920, Number(params.get('height')) || 1080);
 
-const todOf = (s: Shot): number => s.set === 'manor' ? .10 : s.set === 'lake' ? (s.action === 'logo' ? .09 : .11) : .14;
-const generatorFor = (set: Shot['set']): WorldGenerator =>
-  set === 'lake' ? lake : worldGenerator({ kind: set === 'duel' ? 'duel' : set === 'manor' ? 'ratseek' : set, seed: seed });
+/** Hour of the shot at time t: the RPG act runs from sunset into the night. */
+function todOf(s: Shot, t = 0): number {
+  const k = Math.max(0, Math.min(1, t / s.duration));
+  switch (s.action) {
+    case 'rpg-dusk': return .474 + .03 * k;
+    case 'rpg-hero': return .51 + .04 * k;
+    case 'rpg-dark': case 'rpg-rise': return .575;
+    case 'rpg': return .56;
+  }
+  switch (s.set) {
+    case 'manor': return .10;
+    case 'pillars': return .23;
+    case 'disaster': return s.action === 'dc-zombies' ? .478 : .462;
+    case 'whack': case 'tnt': return .2;
+    case 'podium': return .44;
+    case 'lake': return s.action === 'logo' ? .09 : s.action.startsWith('cape') ? .15 : .11;
+    default: return .14;
+  }
+}
+const FOG: Partial<Record<Shot['set'], [number, number]>> = {
+  lake: [62, 150], rpg: [70, 170], pillars: [150, 280], disaster: [80, 190], whack: [110, 230], tnt: [110, 230], podium: [100, 210],
+};
+const generators = new Map<string, WorldGenerator>();
+function generatorFor(set: Shot['set']): WorldGenerator {
+  const spec = trailerWorld(set, seed);
+  if (spec === 'lake') return lake;
+  const key = `${spec.kind}:${spec.seed}`;
+  let g = generators.get(key);
+  if (!g) { g = worldGenerator(spec); generators.set(key, g); }
+  return g;
+}
 
 function env(): Parameters<typeof trailerFrame>[2] {
   return { generator, course, context: { anchor, firstOrder }, dragonHead: dragon.headPosition() };
@@ -155,7 +259,6 @@ function revertEdits(): void {
 async function prepare(index: number): Promise<void> {
   if (!Number.isInteger(index) || !SHOTS[index]) throw new Error(`Invalid shot ${index}`);
   previewing = false;
-  const previous = SHOTS[shotIndex];
   const s = SHOTS[index];
   shotIndex = index;
   lastTime = 0; fireSent = false; eventsNext = 0; lastFrame = null;
@@ -166,12 +269,15 @@ async function prepare(index: number): Promise<void> {
   dragon.clear();
   particles.update(10, camera);
   revertEdits();
-  if (!previous || previous.set !== s.set) {
-    generator = generatorFor(s.set);
+  const next = generatorFor(s.set);
+  if (next !== generator) {
+    generator = next;
     world.setGenerator(generator);
   }
-  if (s.set === 'lake') world.setArenaRenderBounds(null);
-  else world.setArenaRenderBounds(generator.bounds, s.set === 'manor' ? .55 : .65);
+  if (s.set === 'lake' || s.set === 'rpg') world.setArenaRenderBounds(null);
+  else world.setArenaRenderBounds(generator.bounds, s.set === 'manor' ? .55 : s.set === 'disaster' ? .7 : s.set === 'pillars' ? .9 : s.set === 'whack' || s.set === 'tnt' || s.set === 'podium' ? .95 : .65);
+  voidSky.visible = s.set === 'pillars';
+  tintZombies(s.action === 'dc-zombies' ? .78 : 1);
   sky.snapTo(todOf(s));
   if (s.set === 'parkour') {
     ({ firstOrder, anchor } = trailerShotContext(s, course));
@@ -179,13 +285,12 @@ async function prepare(index: number): Promise<void> {
     warmCaptureDragon(dragon, firstOrder);
   }
   edits = trailerEdits(s); events = trailerEvents(s);
-  const frame = trailerFrame(s, s.duration / 2, env());
-  const center = s.set === 'lake' ? new THREE.Vector3(0, 0, 0)
-      : s.set === 'bridge' ? new THREE.Vector3(12, 0, 40)
-        : s.set === 'duel' ? new THREE.Vector3(22, 0, 22)
-          : s.set === 'manor' ? (s.action === 'rs-manor' ? new THREE.Vector3(14, 0, 28) : s.action === 'rs-rescue' ? new THREE.Vector3(22, 0, 2) : new THREE.Vector3(4, 0, 5)) : anchor;
-  const radius = s.set === 'lake' ? 8 : s.set === 'parkour' ? 7 : s.set === 'bridge' && s.action === 'br-arena' ? 5 : 4;
-  void frame;
+  const focus = trailerFocus(s);
+  const center = focus?.center ?? (s.set === 'lake' ? new THREE.Vector3(0, 0, 0)
+    : s.set === 'bridge' ? new THREE.Vector3(12, 0, 40)
+      : s.set === 'duel' ? new THREE.Vector3(22, 0, 22)
+        : s.set === 'manor' ? (s.action === 'rs-manor' ? new THREE.Vector3(14, 0, 28) : s.action === 'rs-rescue' ? new THREE.Vector3(22, 0, 2) : new THREE.Vector3(4, 0, 5)) : anchor);
+  const radius = focus?.radius ?? (s.set === 'lake' ? 8 : s.set === 'parkour' ? 7 : s.set === 'bridge' && s.action === 'br-arena' ? 5 : 4);
   await loadCaptureChunks(world, center.x, center.z, radius, 30, s.id);
   hideAll();
   applyEdits(0);
@@ -196,6 +301,7 @@ async function prepare(index: number): Promise<void> {
 function applyEdits(t: number): void {
   edits.forEach(([x, y, z, block, at], i) => {
     if (at > t + 1e-6 || editNext.has(i)) return;
+    if (block === undefined || !Number.isInteger(block)) throw new Error(`Invalid trailer edit block at ${x},${y},${z}`);
     editNext.add(i);
     editsApplied.push({ x, y, z, original: world.getBlock(x, y, z) });
     world.setBlock(x, y, z, block);
@@ -208,7 +314,9 @@ function hideAll(): void {
   cheese.visible = false;
   tracers.forEach(m => { m.visible = false; });
   arrow.visible = false;
-  dropMeshes.forEach(m => { m.visible = false; });
+  dropPivots.forEach(d => { d.pivot.visible = false; });
+  zombies.forEach(z => { z.group.visible = false; });
+  meteors.forEach(m => { m.visible = false; });
   if (cat) cat.group.visible = false;
 }
 
@@ -228,14 +336,19 @@ function equip(a: Actor, item: number): void {
   }
 }
 
+function dress(a: Actor, tier: CapeTier | undefined): void {
+  if ((a.cape?.tier ?? undefined) === tier) return;
+  a.cape?.dispose(); a.cape = null;
+  if (tier) { a.cape = createCape(tier); wearCape(a.body, a.cape); }
+}
+
 function drawFrame(f: StageFrame, t: number): void {
   hideAll();
-  const used = new Set<number>();
   for (const p of f.actors) {
     const a = actors[p.slot];
     if (!a || p.visible === false) continue;
-    used.add(p.slot);
     equip(a, p.item);
+    dress(a, p.cape);
     a.pivot.visible = true;
     a.pivot.position.set(p.pos[0], p.pos[1] + .9, p.pos[2]);
     a.pivot.rotation.set(p.tilt?.[0] ?? 0, p.yaw, p.tilt?.[2] ?? 0, 'YXZ');
@@ -249,6 +362,7 @@ function drawFrame(f: StageFrame, t: number): void {
       a.body.parts[2].rotation.set(-2.75 * c + wave, 0, -.28 * c);
       a.body.parts[3].rotation.set(-2.75 * c - wave, 0, .28 * c);
     }
+    a.cape?.pose(t + p.slot * .37, p.wind ?? 0, p.speed);
     if (a.flash) a.flash.visible = f.flashes.includes(p.slot);
   }
   f.rats.forEach((p, i) => {
@@ -271,12 +385,28 @@ function drawFrame(f: StageFrame, t: number): void {
     cat.update(f.cat.sit, f.cat.speed, t);
   }
   f.drops.forEach((d, i) => {
-    let m = dropMeshes[i];
-    const info = ITEMS[d.item];
-    const geo = info?.kind === 'block' ? itemGeometry(atlas, d.item) : itemGeometrySolid(atlas, d.item, .42, .05);
-    if (!m) { m = new THREE.Mesh(geo, itemMat); scene.add(m); dropMeshes[i] = m; }
-    m.geometry = geo; m.visible = true;
-    m.position.set(...d.pos); m.scale.setScalar(1.15 * d.scale); m.rotation.set(0, t * 2.6 + i, 0);
+    const pivot = dropPivot(i, d.item);
+    pivot.visible = d.scale > .01;
+    pivot.position.set(...d.pos); pivot.scale.setScalar(1.25 * d.scale); pivot.rotation.set(0, t * 2.6 + i, 0);
+  });
+  f.zombies.forEach((p, i) => {
+    const z = zombies[i];
+    if (!z) return;
+    z.group.visible = true;
+    z.group.position.set(...p.pos);
+    z.yaw = p.yaw; z.group.rotation.y = p.yaw;
+    z.age = t + i * 1.7; z.walk = p.phase;
+    z.dying = p.dying;
+    if (p.dying === undefined) z.group.rotation.z = 0;
+    z.swingAt = p.swingAgo !== undefined ? (t - p.swingAgo) * 1000 : undefined;
+    animateMob(z, 0, p.speed, t * 1000);
+    if (p.dying !== undefined && p.dying > 1.0) z.group.position.y -= (p.dying - 1.0) * .6;
+  });
+  f.meteors.forEach((m, i) => {
+    const g = meteors[i];
+    if (!g) return;
+    g.visible = true; g.position.set(...m.pos); g.scale.setScalar(m.size);
+    g.rotation.set(t * 2.1 + i, t * 1.3, t * .7);
   });
   const tr = f.projectiles.filter(p => p.kind === 'tracer');
   tr.forEach((p, i) => {
@@ -296,21 +426,37 @@ function stepEffects(t: number, dt: number): void {
   if (s.set === 'parkour') {
     const cue = trailerDragonCue(t, firstOrder);
     dragon.sync(cue.front, cue.speed, cue.now);
-    if (s.action === 'pk-dragon' && t > 1.4 && !fireSent && lastFrame) {
+    if ((s.action === 'pk-dragon' || s.action === 'pk-escape') && t > 1.4 && !fireSent && lastFrame) {
       const target = lastFrame.actors[0].pos;
       dragon.fireball({ id: 1, tx: target[0], ty: target[1], tz: target[2] + 4, launchAt: 24400, landAt: 26600 });
       fireSent = true;
     }
     dragon.update(dt, cue.now, 0, false);
   }
+  // Meteor trails: fire close behind the lump, smoke further back.
+  if (lastFrame && dt > 0) for (const m of lastFrame.meteors) {
+    const back = new THREE.Vector3(...m.dir).normalize().multiplyScalar(-1);
+    const [x, y, z] = m.pos;
+    particles.burst(x + back.x * .8 * m.size, y + back.y * .8 * m.size, z + back.z * .8 * m.size, 3, 0xffa040, 1.2, .45, { gravity: 0, spread: .7 * m.size, scale: 1.3 * m.size, additive: true });
+    particles.burst(x + back.x * 2.2 * m.size, y + back.y * 2.2 * m.size, z + back.z * 2.2 * m.size, 2, 0x5a5552, .6, 1.6, { gravity: -.3, spread: 1.0 * m.size, scale: 1.8 * m.size });
+  }
   while (eventsNext < events.length && events[eventsNext].at <= t) {
     const e = events[eventsNext++], [x, y, z] = e.pos;
-    if (e.kind === 'debris') particles.debris(x, y, z, e.color, 12);
-    else if (e.kind === 'ring') particles.ring(x, y, z, e.color, 28, 5, .8);
+    if (e.kind === 'debris') { particles.debris(x, y, z, e.color, 24); particles.debris(x, y + .5, z, 0x6b4a2a, 14); }
+    else if (e.kind === 'ring') particles.ring(x, y, z, e.color, 34, 8, .9);
     else if (e.kind === 'burst') particles.burst(x, y, z, 22, e.color, 4.5, .7, { additive: true, scale: 1.2 });
     else if (e.kind === 'death') particles.deathBurst(x, y, z, e.color);
     else if (e.kind === 'poof') particles.poof(x, y, z);
     else if (e.kind === 'heal') particles.heal(x, y, z, 10);
+    else if (e.kind === 'sparkle') particles.burst(x, y, z, 26, e.color, 2.6, .9, { gravity: -.6, spread: .9, scale: .55, additive: true });
+    else if (e.kind === 'blast') {
+      particles.burst(x, y + .5, z, 70, e.color, 9, .8, { gravity: 2, spread: 1.6, scale: 1.6, additive: true });
+      particles.burst(x, y + .5, z, 30, 0xfff0c0, 5, .45, { gravity: 0, spread: 1.0, scale: 1.2, additive: true });
+    } else if (e.kind === 'smoke') particles.burst(x, y + 1, z, 60, e.color, 2.2, 3.4, { gravity: -1.1, spread: 2.6, scale: 2.4 });
+    else if (e.kind === 'firework') {
+      particles.burst(x, y, z, 90, e.color, 11, 1.4, { gravity: 3.5, spread: .3, scale: .7, additive: true });
+      particles.burst(x, y, z, 30, 0xffffff, 6, .7, { gravity: 2, spread: .2, scale: .45, additive: true });
+    }
   }
   particles.update(dt, camera);
 }
@@ -336,45 +482,69 @@ function applyCamera(s: Shot, t: number): void {
     if (override[6]) c.fov = override[6];
   }
   camera.position.copy(c.position);
-  if (f.shake) camera.position.add(new THREE.Vector3(Math.sin(t * 91) * f.shake, Math.sin(t * 77 + 1) * f.shake, Math.sin(t * 63 + 2) * f.shake));
+  // Each game's title lands with a jolt.
+  const shake = f.shake + (s.title ? .06 * Math.exp(-t * 7) : 0);
+  if (shake) camera.position.add(new THREE.Vector3(Math.sin(t * 91) * shake, Math.sin(t * 77 + 1) * shake, Math.sin(t * 63 + 2) * shake));
   camera.lookAt(c.target);
+  if (c.roll) camera.rotateZ(c.roll);
   camera.fov = c.fov;
   camera.updateProjectionMatrix();
 }
 
 // ── 2D overlays ─────────────────────────────────────────────────────────
 const FONT = `system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif`;
-function text(line: string, x: number, y: number, size: number, align: CanvasTextAlign = 'center', weight = 800, color = '#f7faff', spacing = 0, shadow = '#04101fcc'): void {
+type Ctx2 = CanvasRenderingContext2D & { letterSpacing: string };
+function text(line: string, x: number, y: number, size: number, align: CanvasTextAlign = 'center', weight = 800, color: string | CanvasGradient = '#f7faff', spacing = 0, shadow = '#04101fcc'): void {
   ctx.textAlign = align; ctx.textBaseline = 'middle';
   ctx.font = `${weight} ${size}px ${FONT}`;
-  (ctx as unknown as { letterSpacing: string }).letterSpacing = `${spacing}px`;
+  (ctx as Ctx2).letterSpacing = `${spacing}px`;
   ctx.shadowColor = shadow; ctx.shadowBlur = size * .45; ctx.shadowOffsetY = size * .06;
   ctx.fillStyle = color;
   ctx.fillText(line, x, y);
   ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
-  (ctx as unknown as { letterSpacing: string }).letterSpacing = '0px';
+  (ctx as Ctx2).letterSpacing = '0px';
+}
+function goldFill(y: number, size: number): CanvasGradient {
+  const g = ctx.createLinearGradient(0, y - size / 2, 0, y + size / 2);
+  g.addColorStop(0, '#fff6cf'); g.addColorStop(.45, '#ffd35c'); g.addColorStop(1, '#d08a17');
+  return g;
+}
+const u = (): number => height / 1080;
+/** Cinematic letterbox: ~2.2:1 picture inside the 16:9 frame. */
+const BAR = .0963;
+function letterbox(a = 1): void {
+  ctx.save(); ctx.globalAlpha = a; ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, width, height * BAR); ctx.fillRect(0, height * (1 - BAR), width, height * BAR + 1);
+  ctx.restore();
+}
+function project(p: [number, number, number]): { x: number; y: number; on: boolean } {
+  const v = new THREE.Vector3(...p).project(camera);
+  return { x: (v.x + 1) / 2 * width, y: (1 - v.y) / 2 * height, on: v.z > -1 && v.z < 1 };
 }
 
 /** Caption block: a coloured bar, the game name (first shot of a game) and one line of explanation. */
 function caption(s: Shot, t: number): void {
   const accent = ACCENT[s.set] ?? '#fff';
-  const enter = smooth((t - .25) / .5), leave = 1 - smooth((t - s.duration + .55) / .45);
+  const enter = smooth((t - .2) / .45), leave = 1 - smooth((t - s.duration + .5) / .4);
   const a = enter * leave;
   if (a <= 0 || (!s.label && !s.title)) return;
-  const x = width * .065, base = height * .835, u = height / 1080;
+  const x = width * .065, base = height * .79, k = u();
   ctx.save();
   ctx.globalAlpha = a;
-  ctx.translate((1 - enter) * -40 * u, 0);
-  const lineSize = 40 * u;
+  ctx.translate((1 - enter) * -50 * k, 0);
   const hasTitle = !!s.title;
-  const barH = hasTitle ? 150 * u : 56 * u;
-  ctx.fillStyle = accent; ctx.shadowColor = '#04101f88'; ctx.shadowBlur = 14 * u;
-  ctx.fillRect(x - 28 * u, base - barH * .72, 9 * u, barH);
+  const barH = hasTitle ? 150 * k : 56 * k;
+  ctx.fillStyle = accent; ctx.shadowColor = '#04101f88'; ctx.shadowBlur = 14 * k;
+  ctx.fillRect(x - 28 * k, base - barH * .72, 9 * k, barH);
   ctx.shadowBlur = 0;
   if (hasTitle) {
-    text(s.title!, x, base - 52 * u, 96 * u, 'left', 900, '#ffffff', 3 * u);
-    text(s.label, x + 3 * u, base + 40 * u, lineSize, 'left', 700, '#eef4ff', .5 * u);
-  } else text(s.label, x, base, lineSize, 'left', 700, '#ffffff', .5 * u);
+    // The name slams in slightly oversized and settles.
+    const slam = 1 + (1 - smooth(t / .35)) * .12;
+    ctx.save(); ctx.translate(x, base - 52 * k); ctx.scale(slam, slam);
+    text(s.title!, 0, 0, 100 * k, 'left', 900, '#ffffff', 4 * k);
+    ctx.restore();
+    text(s.label, x + 3 * k, base + 40 * k, 38 * k, 'left', 700, '#eef4ff', .5 * k);
+  } else text(s.label, x, base, 38 * k, 'left', 700, '#ffffff', .5 * k);
   ctx.restore();
 }
 
@@ -382,54 +552,122 @@ function caption(s: Shot, t: number): void {
 function gameTag(s: Shot, t: number): void {
   const name = GAME_NAME[s.set];
   if (!name || s.title) return;
-  const accent = ACCENT[s.set], u = height / 1080;
+  const accent = ACCENT[s.set], k = u();
   const a = smooth(t / .4) * (1 - smooth((t - s.duration + .3) / .3));
   ctx.save(); ctx.globalAlpha = a * .95;
-  ctx.font = `800 ${24 * u}px ${FONT}`; (ctx as unknown as { letterSpacing: string }).letterSpacing = `${3 * u}px`;
-  const w = ctx.measureText(name).width + 62 * u, h = 46 * u, x = width * .065 - 28 * u, y = height * .07;
-  ctx.fillStyle = '#071221cc'; ctx.beginPath(); ctx.roundRect(x, y, w, h, 23 * u); ctx.fill();
-  ctx.fillStyle = accent; ctx.beginPath(); ctx.arc(x + 24 * u, y + h / 2, 7 * u, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#fff'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillText(name, x + 42 * u, y + h / 2 + 1 * u);
-  (ctx as unknown as { letterSpacing: string }).letterSpacing = '0px';
+  ctx.font = `800 ${24 * k}px ${FONT}`; (ctx as Ctx2).letterSpacing = `${3 * k}px`;
+  const w = ctx.measureText(name).width + 62 * k, h = 46 * k, x = width * .065 - 28 * k, y = height * BAR + 26 * k;
+  ctx.fillStyle = '#071221cc'; ctx.beginPath(); ctx.roundRect(x, y, w, h, 23 * k); ctx.fill();
+  ctx.fillStyle = accent; ctx.beginPath(); ctx.arc(x + 24 * k, y + h / 2, 7 * k, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillText(name, x + 42 * k, y + h / 2 + 1 * k);
+  (ctx as Ctx2).letterSpacing = '0px';
   ctx.restore();
 }
 
-/** The classic games as a poster wall, each column rising in on a beat. */
+/** Full-frame statements in the cold open: wide-tracked, settling in from slightly large. */
+function slates(s: Shot, t: number): void {
+  for (const [from, to, line] of s.slates ?? []) {
+    if (t < from - .05 || t > to + .05) continue;
+    const a = smooth((t - from) / .5) * (1 - smooth((t - to + .55) / .55));
+    const grow = 1.08 - .08 * smooth((t - from) / (to - from));
+    ctx.save();
+    ctx.globalAlpha = a * .45; ctx.fillStyle = '#020812'; ctx.fillRect(0, 0, width, height);
+    ctx.globalAlpha = a;
+    ctx.translate(width / 2, height / 2); ctx.scale(grow, grow);
+    text(line, 0, 0, 120 * u(), 'center', 900, '#ffffff', 26 * u(), '#000000cc');
+    ctx.restore();
+  }
+}
+
+/** Score popups (Whack-a-Mole): rise and fade over the mole that was hit. */
+function popups(f: StageFrame): void {
+  for (const p of f.popups) {
+    const s = project(p.pos);
+    if (!s.on) continue;
+    ctx.save(); ctx.globalAlpha = 1 - smooth((p.k - .6) / .4);
+    const pop = 1 + (1 - smooth(p.k / .15)) * .5;
+    ctx.translate(s.x, s.y); ctx.scale(pop, pop);
+    text(p.text, 0, 0, 64 * u(), 'center', 900, p.color, 0, '#000000dd');
+    ctx.restore();
+  }
+}
+
+/** The capes announcement over the reveal. */
+function capeTitle(t: number): void {
+  const k = u();
+  const a = smooth((t - 2.0) / .45);
+  if (a <= 0) return;
+  ctx.save();
+  const g = ctx.createLinearGradient(0, height * .55, 0, height);
+  g.addColorStop(0, '#02081200'); g.addColorStop(1, '#020812cc');
+  ctx.globalAlpha = a; ctx.fillStyle = g; ctx.fillRect(0, height * .55, width, height * .45);
+  const slam = 1 + (1 - smooth((t - 2.0) / .35)) * .25;
+  ctx.translate(width / 2, height * .7); ctx.scale(slam, slam);
+  text('CAPES ARE COMING', 0, 0, 112 * k, 'center', 900, goldFill(0, 112 * k), 14 * k, '#000000cc');
+  ctx.restore();
+  const b = smooth((t - 3.1) / .5);
+  ctx.save(); ctx.globalAlpha = b;
+  text('Win them. Wear them. Never bought.', width / 2, height * .79, 40 * k, 'center', 700, '#ffffff', 2 * k);
+  ctx.restore();
+}
+
+/** Tier names above each cape, landing one by one. */
+function capeTiers(f: StageFrame, t: number): void {
+  const k = u();
+  f.actors.forEach((p, i) => {
+    const at = .5 + i * .6, a = smooth((t - at) / .3);
+    if (a <= 0) return;
+    const s = project([p.pos[0], p.pos[1] + 2.45, p.pos[2]]);
+    if (!s.on) return;
+    s.y = Math.max(s.y, height * BAR + 40 * k);
+    const tier = TIER_LABEL[i];
+    ctx.save(); ctx.globalAlpha = a;
+    ctx.translate(s.x, s.y - (1 - a) * 20 * k);
+    text(tier.name, 0, 0, (i === 3 ? 44 : 36) * k, 'center', 900, i === 3 ? goldFill(0, 44 * k) : tier.color, 4 * k, '#000000dd');
+    ctx.restore();
+  });
+  const b = smooth((t - 2.7) / .5);
+  ctx.save(); ctx.globalAlpha = b;
+  text('EARN CAPES IN EVERY GAME', width / 2, height * (1 - BAR) - 58 * k, 46 * k, 'center', 900, '#ffffff', 10 * k, '#000000dd');
+  ctx.restore();
+}
+
+/** Every game as a poster wall, each column rising in on a beat. */
 function reel(t: number): void {
   ctx.save();
   ctx.fillStyle = '#060d18'; ctx.fillRect(0, 0, width, height);
-  const colW = width / POSTERS.length;
+  const colW = width / POSTERS.length, step = .5;
   POSTERS.forEach((p, i) => {
-    const k = smooth((t - i * .8) / .55);
+    const k = smooth((t - i * step) / .45);
     if (k <= 0) return;
     const x = i * colW, rise = (1 - k) * height * .35;
     ctx.save();
     ctx.beginPath(); ctx.rect(x + 2, 0, colW - 4, height); ctx.clip();
     ctx.globalAlpha = k;
-    const iw = p.image.naturalWidth, ih = p.image.naturalHeight, ground = ih * .2;
-    const srcH = ih - ground, scale = height / srcH * 1.06;
-    const sw = colW / scale, focus = .5, sx = Math.max(0, Math.min(iw - sw, iw * focus - sw / 2));
+    const iw = p.image.naturalWidth, ih = p.image.naturalHeight, ground = ih * .12;
+    const srcH = ih - ground, scale = height / srcH * 1.04 * (1 + (4 - t) * .01);
+    const sw = colW / scale, sx = Math.max(0, Math.min(iw - sw, iw * p.focus - sw / 2));
     ctx.drawImage(p.image, sx, 0, sw, srcH, x, rise, colW, srcH * scale);
     const g = ctx.createLinearGradient(0, height * .55, 0, height);
     g.addColorStop(0, '#04101800'); g.addColorStop(1, '#041018f0');
     ctx.fillStyle = g; ctx.fillRect(x, 0, colW, height);
-    ctx.fillStyle = p.accent; ctx.fillRect(x + colW * .12, height * .865, colW * .76 * smooth((t - i * .8 - .2) / .5), 6 * height / 1080);
+    ctx.fillStyle = p.accent; ctx.fillRect(x + colW * .12, height * .865, colW * .76 * smooth((t - i * step - .2) / .4), 6 * u());
     ctx.restore();
     ctx.save(); ctx.globalAlpha = k;
-    // Long names wrap onto two lines at the last space.
-    const cut = p.name.length > 9 ? p.name.lastIndexOf(' ') : -1;
+    // Two-word names stack onto two lines.
+    const cut = p.name.indexOf(' ');
+    const size = Math.min(colW * .135, 40 * u());
     if (cut > 0) {
-      const size = colW * .13;
       text(p.name.slice(0, cut), x + colW / 2, height * .905, size, 'center', 900, '#fff', 1.5);
-      text(p.name.slice(cut + 1), x + colW / 2, height * .945, size, 'center', 900, '#fff', 1.5);
-    } else text(p.name, x + colW / 2, height * .93, colW * .16, 'center', 900, '#fff', 1.5);
+      text(p.name.slice(cut + 1), x + colW / 2, height * .948, size, 'center', 900, '#fff', 1.5);
+    } else text(p.name, x + colW / 2, height * .925, size * 1.15, 'center', 900, '#fff', 1.5);
     ctx.restore();
   });
   ctx.restore();
 }
 
 function lockup(t: number, d: number): void {
-  const k = smooth(t / 1.3), u = height / 1080;
+  const k = smooth(t / 1.0), s = u();
   ctx.save();
   ctx.globalAlpha = k;
   const w = width * .56, h = w * 120 / 900;
@@ -439,28 +677,120 @@ function lockup(t: number, d: number): void {
   glow.addColorStop(0, '#f2f8ffee'); glow.addColorStop(.6, '#edf5ffc0'); glow.addColorStop(1, '#edf5ff00');
   ctx.fillStyle = glow; ctx.fillRect(0, 0, width, height);
   ctx.drawImage(logo, x, y, w, h);
-  const reveal = smooth((t - 1.8) / .45);
-  ctx.globalAlpha = k * reveal;
-  ctx.save();
-  ctx.translate(width / 2, height * .6);
-  ctx.scale(1 + (1 - reveal) * .2, 1 + (1 - reveal) * .2);
-  text(RELEASE, 0, 0, 62 * u, 'center', 900, '#0d2340', 14 * u, '#ffffffdd');
-  ctx.restore();
   ctx.restore();
   ctx.save();
-  ctx.globalAlpha = .3 * Math.exp(-Math.max(0, t - 1.8) * 5) * reveal;
+  ctx.globalAlpha = .4 * Math.exp(-t * 4);
   ctx.fillStyle = '#fff1d2'; ctx.fillRect(0, 0, width, height);
   ctx.restore();
-  const names = smooth((t - 2.6) / .7);
-  ctx.save(); ctx.globalAlpha = names;
-  text(POSTERS.map(p => p.name).join('   ·   '), width / 2, height * .715, 24 * u, 'center', 800, '#ffffff', 4 * u);
+  const reveal = smooth((t - 1.0) / .45);
+  ctx.save(); ctx.globalAlpha = k * reveal;
+  ctx.translate(width / 2, height * .57); ctx.scale(1 + (1 - reveal) * .2, 1 + (1 - reveal) * .2);
+  text('7 GAMES. ONE WORLD.', 0, 0, 56 * s, 'center', 900, '#0d2340', 12 * s, '#ffffffdd');
   ctx.restore();
-  const early = smooth((t - 3.7) / .7) * (1 - smooth((t - d + .9) / .6));
+  const names = smooth((t - 1.9) / .7);
+  ctx.save(); ctx.globalAlpha = names;
+  text(POSTERS.slice(0, 3).map(p => p.name).join('   ·   '), width / 2, height * .68, 26 * s, 'center', 800, '#ffffff', 4 * s);
+  text(POSTERS.slice(3).map(p => p.name).join('   ·   '), width / 2, height * .73, 26 * s, 'center', 800, '#ffffff', 4 * s);
+  ctx.restore();
+  const date = smooth((t - 2.8) / .6) * (1 - smooth((t - d + .7) / .6));
+  ctx.save(); ctx.globalAlpha = date;
+  ctx.font = `800 ${30 * s}px ${FONT}`;
+  const tw = ctx.measureText(RELEASE).width + 140 * s;
+  ctx.fillStyle = '#ffffffee'; ctx.beginPath(); ctx.roundRect((width - tw) / 2, height * .8, tw, 64 * s, 32 * s); ctx.fill();
+  text(RELEASE, width / 2, height * .8 + 33 * s, 30 * s, 'center', 900, '#0d2340', 8 * s, '#ffffff00');
+  ctx.restore();
+}
+
+/** The black before the RPG: nothing but a faint ember glow that swells on each heartbeat. */
+function darkPulse(t: number): void {
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, width, height);
+  const beat = [1, 2, 3].reduce((m, b) => Math.max(m, t >= b ? Math.exp(-(t - b) * 3.5) : 0), 0);
+  const a = smooth(t / .25) * (.55 + .45 * beat);
+  const glow = ctx.createRadialGradient(width / 2, height / 2, 0, width / 2, height / 2, width * .42);
+  glow.addColorStop(0, `rgba(96,52,22,${a})`); glow.addColorStop(.5, `rgba(40,20,10,${a * .6})`); glow.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = glow; ctx.fillRect(0, 0, width, height);
+}
+
+/** The RPG act's statements: wide-tracked, warm, settling into the lower frame. */
+function rpgSlates(s: Shot, t: number, dark: boolean): void {
+  const k = u();
+  for (const [from, to, line] of s.slates ?? []) {
+    if (t < from - .05 || t > to + .05) continue;
+    const a = smooth((t - from) / .6) * (1 - smooth((t - to + .6) / .6));
+    const drift = 1.04 - .04 * smooth((t - from) / (to - from));
+    ctx.save();
+    if (!dark) {
+      const veil = ctx.createLinearGradient(0, height * .45, 0, height);
+      veil.addColorStop(0, '#02060d00'); veil.addColorStop(1, '#02060dcc');
+      ctx.globalAlpha = a; ctx.fillStyle = veil; ctx.fillRect(0, 0, width, height);
+    }
+    ctx.globalAlpha = a;
+    ctx.translate(width / 2, dark ? height / 2 : height * .74); ctx.scale(drift, drift);
+    text(line, 0, 0, (dark ? 64 : 70) * k, 'center', 800, dark ? '#e9eef7' : '#fff4dc', (dark ? 22 : 18) * k, '#000000ee');
+    ctx.restore();
+  }
+}
+
+/** The RPG title card: silence, then the title slams in over the night lake,
+ *  and the card spells out that it launches on its own, after Worlds. */
+function rpgCard(t: number, d: number): void {
+  const s = u(), hit = .6;
+  const leave = 1 - smooth((t - d + 1.1) / .8);
+  ctx.save();
+  const shade = ctx.createLinearGradient(0, 0, 0, height);
+  shade.addColorStop(0, '#02060d77'); shade.addColorStop(.5, '#02060d33'); shade.addColorStop(1, '#02060ddd');
+  ctx.fillStyle = shade; ctx.fillRect(0, 0, width, height);
+  ctx.restore();
+  // Half a second of black, then the slam and a white burn.
+  if (t < hit) { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, width, height); return; }
+  const lt = t - hit;
+  ctx.save(); ctx.globalAlpha = .9 * Math.exp(-lt * 3.2);
+  ctx.fillStyle = '#fff4d8'; ctx.fillRect(0, 0, width, height);
+  ctx.restore();
+  const eyebrow = smooth((lt - 1.0) / .7) * leave;
+  ctx.save(); ctx.globalAlpha = eyebrow;
+  text(RPG.eyebrow, width / 2, height * .265, 30 * s, 'center', 800, '#e9eef7', 16 * s, '#000000cc');
+  ctx.restore();
+  const title = smooth(lt / .12) * leave;
+  ctx.save(); ctx.globalAlpha = title;
+  ctx.translate(width / 2, height * .4);
+  const grow = (1 + (1 - smooth(lt / .35)) * .35) * (1.04 - .04 * smooth(lt / 8)); ctx.scale(grow, grow);
+  text(RPG.title, 0, 0, 180 * s, 'center', 900, goldFill(0, 180 * s), 32 * s, '#000000ee');
+  ctx.restore();
+  // The date lands on the second boom.
+  const dateAt = 2.4, date = smooth((lt - dateAt) / .2) * leave;
+  ctx.save(); ctx.globalAlpha = date;
+  ctx.translate(width / 2, height * .555); const slam = 1 + (1 - smooth((lt - dateAt) / .3)) * .3; ctx.scale(slam, slam);
+  text(RPG.date, 0, 0, 78 * s, 'center', 900, '#ffffff', 20 * s, '#000000ee');
+  ctx.restore();
+  ctx.save(); ctx.globalAlpha = .5 * Math.exp(-Math.max(0, lt - dateAt) * 5) * (lt >= dateAt ? 1 : 0);
+  ctx.fillStyle = '#fff4d8'; ctx.fillRect(0, 0, width, height);
+  ctx.restore();
+  // Spelled out: this is its own launch.
+  const sep = smooth((lt - 3.6) / .6) * leave;
+  ctx.save(); ctx.globalAlpha = sep;
+  const rule = 260 * s * smooth((lt - 3.6) / .8);
+  ctx.fillStyle = '#ffd35c'; ctx.fillRect(width / 2 - rule, height * .625, rule * 2, 2 * s);
+  text(RPG.separate, width / 2, height * .665, 34 * s, 'center', 800, '#ffffff', 9 * s, '#000000ee');
+  ctx.restore();
+  const early = smooth((lt - 4.6) / .6) * leave;
   ctx.save(); ctx.globalAlpha = early;
-  ctx.font = `800 ${28 * u}px ${FONT}`;
-  const msg = 'EARLY ACCESS STARTS WITHIN DAYS', tw = ctx.measureText(msg).width + 90 * u;
-  ctx.fillStyle = '#ffffffee'; ctx.beginPath(); ctx.roundRect((width - tw) / 2, height * .795, tw, 62 * u, 31 * u); ctx.fill();
-  text(msg, width / 2, height * .795 + 32 * u, 28 * u, 'center', 800, '#0d2340', 3 * u);
+  ctx.font = `800 ${28 * s}px ${FONT}`; (ctx as Ctx2).letterSpacing = `${6 * s}px`;
+  const tw = ctx.measureText(RPG.early).width + 110 * s;
+  (ctx as Ctx2).letterSpacing = '0px';
+  ctx.fillStyle = '#ffd35cee'; ctx.beginPath(); ctx.roundRect((width - tw) / 2, height * .725, tw, 62 * s, 31 * s); ctx.fill();
+  text(RPG.early, width / 2, height * .725 + 32 * s, 28 * s, 'center', 900, '#1a1206', 6 * s, '#00000000');
+  ctx.restore();
+  // Two launches, side by side, so nobody mistakes one for the other.
+  const both = smooth((lt - 5.6) / .7) * leave;
+  ctx.save(); ctx.globalAlpha = both * .95;
+  const y = height * .855;
+  RPG.launches.forEach(([name, when], i) => {
+    const x = width / 2 + (i ? 1 : -1) * 250 * s;
+    text(name, x, y - 19 * s, 26 * s, 'center', 900, i ? '#ffd35c' : '#cfe3ff', 6 * s, '#000000ee');
+    text(when, x, y + 19 * s, 26 * s, 'center', 700, '#ffffff', 4 * s, '#000000ee');
+  });
+  ctx.fillStyle = '#ffffff66'; ctx.fillRect(width / 2 - 1 * s, y - 30 * s, 2 * s, 60 * s);
   ctx.restore();
 }
 
@@ -473,31 +803,49 @@ function render(t: number, clean = false, branded = false): void {
   animate(t, Math.max(0, t - lastTime));
   lastTime = t;
   applyCamera(s, t);
-  sky.update(1 / 60, camera, todOf(s));
+  // The sunset is keyed to the shot clock, not eased, so every frame is exact.
+  sky.snapTo(todOf(s, t));
+  sky.update(1 / 60, camera, todOf(s, t));
+  voidSky.position.copy(camera.position);
   world.applySky(sky);
   world.timeUniform.value = s.start + t;
   (scene.background as THREE.Color).copy(sky.skyColor);
-  (scene.fog as THREE.Fog).color.copy(sky.skyColor);
   const fog = scene.fog as THREE.Fog;
-  fog.near = s.set === 'lake' ? 62 : 90;
-  fog.far = s.set === 'lake' ? 150 : 185;
+  fog.color.copy(sky.skyColor);
+  if (voidSky.visible) fog.color.set(0xc4e5fa);
+  [fog.near, fog.far] = FOG[s.set] ?? [90, 185];
   shadows.update(sky.lightDir, camera.position, sky.lightHeight, sky.moonlit, 1 / 30);
   postfx.setSky(sky, camera);
   postfx.render(camera, s.start + t);
   ctx.globalAlpha = 1;
-  if (!clean || branded) ctx.filter = 'saturate(1.1) contrast(1.05)';
+  if (!clean || branded) ctx.filter = s.set === 'disaster' ? 'saturate(1.15) contrast(1.1)' : s.set === 'rpg' ? 'saturate(1.2) contrast(1.12)' : 'saturate(1.1) contrast(1.06)';
   ctx.drawImage(renderer.domElement, 0, 0, width, height);
   ctx.filter = 'none';
+  const f = lastFrame!;
+  if (f.flash > 0) { ctx.save(); ctx.globalAlpha = Math.min(1, f.flash) * .8; ctx.fillStyle = '#eef4ff'; ctx.fillRect(0, 0, width, height); ctx.restore(); }
   if (!clean) {
     if (s.action === 'reel') reel(t);
     const vignette = ctx.createRadialGradient(width / 2, height / 2, height * .3, width / 2, height / 2, width * .66);
-    vignette.addColorStop(0, '#02081200'); vignette.addColorStop(1, '#02081255');
+    vignette.addColorStop(0, '#02081200'); vignette.addColorStop(1, s.set === 'rpg' ? '#020812aa' : '#02081266');
     ctx.fillStyle = vignette; ctx.fillRect(0, 0, width, height);
+    if (s.action === 'pg-whack') popups(f);
+    const boxed = s.action !== 'reel' && s.action !== 'logo';
+    if (s.action === 'rpg-dark') darkPulse(t);
+    if (boxed) letterbox(s.start === 0 ? smooth(t / 1.0) : 1);
     if (s.action === 'logo') lockup(t, s.duration);
+    else if (s.action === 'rpg') rpgCard(t, s.duration);
+    else if (s.action === 'rpg-dark' || s.action === 'rpg-dusk' || s.action === 'rpg-hero') rpgSlates(s, t, s.action === 'rpg-dark');
+    else if (s.action === 'rpg-rise') { /* picture only */ }
+    else if (s.action === 'cape-reveal') capeTitle(t);
+    else if (s.action === 'cape-tiers') capeTiers(f, t);
+    else if (s.action === 'lake') slates(s, t);
     else if (s.action !== 'reel') { caption(s, t); gameTag(s, t); }
     // Soft dip at the cuts; the opening rises from black and the end fades out.
-    const fade = s.start === 0 ? 1 - smooth(t / 1.3) : 1 - smooth(t / .12);
-    const out = s.action === 'logo' ? smooth((t - s.duration + .8) / .8) : smooth((t - s.duration + .12) / .12);
+    // The RPG act fades up out of black on its own; the Worlds card fades out fully first.
+    const fade = s.start === 0 ? 1 - smooth(t / 1.3) : s.action === 'rpg-dusk' ? 1 - smooth(t / 1.4) : 1 - smooth(t / .1);
+    const out = s.action === 'rpg' ? smooth((t - s.duration + 1.0) / .9)
+      : s.action === 'logo' ? smooth((t - s.duration + .7) / .6)
+        : s.action === 'rpg-rise' ? 0 : smooth((t - s.duration + .1) / .1);
     ctx.fillStyle = `rgba(2,6,13,${Math.max(fade, out)})`; ctx.fillRect(0, 0, width, height);
   }
   if (branded) {
@@ -536,7 +884,7 @@ async function preview(): Promise<void> {
 }
 
 const api = {
-  shots: SHOTS, screenshots: SCREENSHOTS, duration: DURATION, seed, canvas,
+  shots: SHOTS, screenshots: SCREENSHOTS, heroFrames: HERO_FRAMES, duration: DURATION, seed, canvas,
   prepare, render, resize,
   setExporting(on: boolean) { exporting = on; previewing = false; document.getElementById('controls')!.hidden = on; },
   get logoSVG() { return logoSVG; },
@@ -569,7 +917,7 @@ declare global { interface Window { __trailer: typeof api } }
 window.__trailer = api;
 async function initialize(): Promise<void> {
   await Promise.all([loadLogo(), loadPosters()]);
-  await prepare(0);
+  await prepare(Number(params.get('shot')) || 0);
   document.body.dataset.ready = 'true';
   if (!capture) void preview();
 }

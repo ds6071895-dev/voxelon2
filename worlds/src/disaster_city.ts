@@ -7,7 +7,7 @@ import { VenueGenerator, registerWorldKind } from './multiverse';
 import { Canvas, type VenueStamp } from './vanilla/stamp';
 import { Deco, E, N, S, W, finishShapes, opposite } from './vanilla/deco';
 import {
-  APARTMENTS, CITY, DINER, FIRE_STATION, GARAGE, GAS_STORE, HOSE_TOWER, HOUSE, MAST_TOP, OFFICE, SHOPS, SKYSCRAPER,
+  APARTMENTS, BUILDINGS, CITY, DINER, FIRE_STATION, GARAGE, GAS_STORE, HOSE_TOWER, HOUSE, MAST_TOP, OFFICE, SHOPS, SKYSCRAPER,
   bcx, bcz, buildingAt, isRoad, lotIndex, manholes, overSubway, type Building,
 } from './disaster_rules';
 
@@ -20,6 +20,26 @@ class CityBuilder {
   build(): void {
     this.ground(); this.roads(); this.subway(); this.plaza(); this.skyscraper(); this.office(); this.apartments(); this.shops();
     this.garage(); this.gasStation(); this.fireStation(); this.southEast(); this.greenery(); this.lamps(); this.cars(); this.edge();
+    this.interiorLights();
+  }
+  /** Not in the plugin: its rooms were lit only through the windows, so deep
+   *  floors read as caves. Hanging lanterns on a grid under every ceiling
+   *  with headroom to spare. Runs last and draws no random numbers, so the
+   *  seeded layout above is unchanged. */
+  private interiorLights(): void {
+    const d = this.d, SPACING = 6;
+    const grid = (a: number, b: number): number[] => {
+      const n = Math.max(1, Math.round((b - a) / SPACING));
+      return Array.from({ length: n }, (_, i) => a + Math.round((i + .5) * (b - a) / n));
+    };
+    for (const b of BUILDINGS) {
+      if (b === HOSE_TOWER) continue; // a ladder shaft, lit by its windows
+      for (const x of grid(b.x1, b.x2)) for (const z of grid(b.z1, b.z2)) {
+        for (let y = GROUND + 3; y < b.roof; y++) {
+          if (d.empty(x, y, z) && !d.empty(x, y + 1, z) && d.empty(x, y - 1, z) && d.empty(x, y - 2, z)) d.lantern(x, y, z, true);
+        }
+      }
+    }
   }
   private ground(): void {
     for (let x = CITY.MIN; x <= CITY.MAX; x++) for (let z = CITY.MIN; z <= CITY.MAX; z++) {

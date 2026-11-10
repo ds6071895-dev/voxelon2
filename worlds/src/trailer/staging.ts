@@ -4,56 +4,26 @@
 import * as THREE from 'three';
 import { TITLE_SEA } from '../title_terrain';
 import { parkourStandSpot, type ParkourCourse } from '../parkour_course';
-import type { WorldGenerator } from '../multiverse';
+import type { WorldGenerator, WorldKind } from '../multiverse';
 import { chooseCaptureCourse } from '../media/course';
 import { captureGround } from '../media/offline';
 import { Item } from '../items';
 import { Block } from '../blocks';
 import type { Shot } from './shots';
+import { type V3, type StageFrame, type StageEdit, type StageEvent, type ActorPose, type TrailerShotContext, type TrailerCamera,
+  sm, lerp, mix3, face, vec, clamp01, stridePhase, swingOf, camOf, emptyFrame } from './stage_types';
+import { modeEdits, modeEvents, modeFrame, modeWorld, modeFocus } from './staging_modes';
+export { useTrailerLake } from './staging_modes';
 
-export type V3 = [number, number, number];
-export interface TrailerShotContext { firstOrder: number; anchor: THREE.Vector3 }
-export interface TrailerCamera { position: THREE.Vector3; target: THREE.Vector3; fov: number; roll?: number }
+/** The world each set is built from: the title valley, or a venue generator. */
+export function trailerWorld(set: Shot['set'], seed: number): { kind: WorldKind; seed: number } | 'lake' {
+  if (set === 'lake' || set === 'rpg') return 'lake';
+  return modeWorld(set) ?? { kind: (set === 'manor' ? 'ratseek' : set) as WorldKind, seed };
+}
+export { modeFocus as trailerFocus };
 
-/** One avatar. Slots keep a character's look from shot to shot. */
-export interface ActorPose {
-  slot: number;
-  pos: V3;
-  yaw: number;
-  item: number;
-  walk: number;
-  speed: number;
-  attack?: number;
-  pitch?: number;
-  aim?: number;
-  kick?: number;
-  bow?: number;
-  /** Extra body rotation about x and z (a knock-back tumble). */
-  tilt?: V3;
-  /** 0..1: both arms thrown up. */
-  cheer?: number;
-  visible?: boolean;
-}
-export interface RatPose { pos: V3; yaw: number; speed: number; phase: number; caged: boolean; cheese?: boolean }
-export interface CatPose { pos: V3; yaw: number; speed: number; sit: boolean }
-export interface DropPose { item: number; pos: V3; scale: number }
-export interface ProjectilePose { pos: V3; dir: V3; kind: 'arrow' | 'tracer' }
-export interface StageFrame {
-  camera: TrailerCamera;
-  actors: ActorPose[];
-  rats: RatPose[];
-  cat?: CatPose;
-  drops: DropPose[];
-  projectiles: ProjectilePose[];
-  /** Camera shake amplitude (blocks). */
-  shake: number;
-  /** Duel muzzle flashes: slot numbers firing this frame. */
-  flashes: number[];
-}
-/** A one-shot particle effect, fired the first time the shot clock passes `at`. */
-export interface StageEvent { at: number; kind: 'debris' | 'ring' | 'burst' | 'death' | 'poof' | 'heal'; pos: V3; color: number }
-/** Blocks that appear (or, with `block` = Air, vanish) during a shot. */
-export type StageEdit = [x: number, y: number, z: number, block: number, at: number];
+export type { V3, TrailerShotContext, TrailerCamera, ActorPose, RatPose, CatPose, DropPose, ProjectilePose, StageFrame, StageEvent, StageEdit, ZombiePose, MeteorPose, PopupPose } from './stage_types';
+export { captureSmooth } from './stage_types';
 
 export const createTrailerCourse = () => chooseCaptureCourse(['rooftops', 'waterfall']);
 
@@ -65,30 +35,19 @@ export function trailerShotContext(s: Shot, course: ParkourCourse): TrailerShotC
   return { firstOrder, anchor: new THREE.Vector3(p.x, p.y, p.z) };
 }
 
-export const captureSmooth = (t: number): number => {
-  const k = Math.max(0, Math.min(1, t));
-  return k * k * (3 - 2 * k);
-};
-const sm = captureSmooth;
-const lerp = (a: number, b: number, k: number): number => a + (b - a) * k;
-const mix3 = (a: V3, b: V3, k: number): V3 => [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
-/** Heading that faces `to` from `from` (Worlds' forward is -z). */
-const face = (from: V3, to: V3): number => Math.atan2(-(to[0] - from[0]), -(to[2] - from[2]));
-const vec = (p: V3): THREE.Vector3 => new THREE.Vector3(p[0], p[1], p[2]);
-const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
-
-/** Stand-in for an avatar's stride phase: advances with distance walked. */
-const stridePhase = (t: number, speed: number): number => t * (4 + speed * 1.25);
-
-export function trailerEdits(_s: Shot): StageEdit[] { return []; }
+export function trailerEdits(s: Shot): StageEdit[] { return modeEdits(s); }
 
 export function trailerEvents(s: Shot): StageEvent[] {
-  const events: StageEvent[] = [];
+  const events: StageEvent[] = modeEvents(s);
   if (s.action === 'br-goal') events.push({ at: 3.0, kind: 'ring', pos: [12.5, 141.2, 7.5], color: 0xffe08a }, { at: 3.0, kind: 'burst', pos: [12.5, 141.6, 7.5], color: 0xfff1b8 });
   if (s.action === 'du-fight') events.push({ at: 5.5, kind: 'death', pos: [24.2, 99.4, 20.6], color: 0x2f6fe0 });
+  if (s.action === 'rs-catch') events.push({ at: 1.62, kind: 'poof', pos: [-.2, 81.2, 3.3], color: 0xffffff }, { at: 1.62, kind: 'burst', pos: [-.2, 81.6, 3.3], color: 0xfff1b8 });
+  if (s.action === 'br-score') events.push({ at: 2.75, kind: 'ring', pos: [12.5, 141.2, 7.5], color: 0xffe08a }, { at: 2.75, kind: 'burst', pos: [12.5, 141.6, 7.5], color: 0xfff1b8 });
+  if (s.action === 'br-charge') events.push({ at: 3.35, kind: 'burst', pos: [12.5, 142.4, 29.4], color: 0xffffff });
+  if (s.action === 'du-standoff') events.push({ at: 5.35, kind: 'death', pos: [24.2, 99.4, 20.6], color: 0x2f6fe0 });
   if (s.action === 'rs-rescue') events.push({ at: 1.0, kind: 'burst', pos: [29.5, 82.3, 0], color: 0xfff1b8 });
   if (s.action === 'br-duel') events.push({ at: 1.5, kind: 'burst', pos: [12.5, 142.5, 52.0], color: 0xffffff }, { at: 3.0, kind: 'burst', pos: [12.5, 142.5, 50.2], color: 0xffffff });
-  return events;
+  return events.sort((a, b) => a.at - b.at);
 }
 
 interface Env {
@@ -98,22 +57,18 @@ interface Env {
   dragonHead?: THREE.Vector3;
 }
 
-const camOf = (from: V3, to: V3, target: V3, fov: number, k: number, extra: Partial<TrailerCamera> = {}): TrailerCamera =>
-  ({ position: vec(mix3(from, to, sm(k))), target: vec(target), fov, ...extra });
-
-const emptyFrame = (camera: TrailerCamera): StageFrame =>
-  ({ camera, actors: [], rats: [], drops: [], projectiles: [], shake: 0, flashes: [] });
-
 /** The duel arena positions, shared by the camera and the audit. */
 const DUEL_A: V3 = [20.0, 0, 23.5], DUEL_B: V3 = [23.9, 0, 20.5];
 
 export function trailerFrame(s: Shot, t: number, env: Env): StageFrame {
   const k = t / s.duration;
   const a = env.context.anchor;
+  const mode = modeFrame(s, t, env);
+  if (mode) return mode;
   switch (s.action) {
     case 'lake': {
-      const f = emptyFrame(camOf([12, TITLE_SEA + 13, 27], [-8, TITLE_SEA + 18, 25], [-48, TITLE_SEA + 25, -42], 62, k));
-      return f;
+      // The cold open: rise slowly out over the valley as the statements land.
+      return emptyFrame(camOf([14, TITLE_SEA + 15, 28], [-8, TITLE_SEA + 23, 24], [-48, TITLE_SEA + 24, -42], 58, k));
     }
     case 'logo': {
       return emptyFrame(camOf([8, TITLE_SEA + 14, 22], [-4, TITLE_SEA + 17, 22], [-48, TITLE_SEA + 24, -42], 60, k));
@@ -134,15 +89,15 @@ export function trailerFrame(s: Shot, t: number, env: Env): StageFrame {
       // The open span between the middle island and the cobalt base: nothing but void on both sides.
       const zc = 51.4;
       const f = emptyFrame(camOf([17.6, 142.8, zc - 5.2], [16.6, 143.0, zc - 2.6], [12.5, 142.4, zc + .2], 50, k));
-      const swingOf = (times: number[]): number => times.reduce((m, c) => Math.max(m, t >= c && t < c + .3 ? Math.sin((t - c) / .3 * Math.PI) : 0), 0);
+      const swing = (times: number[]): number => swingOf(t, times);
       const hitK = (c: number): number => t >= c ? Math.exp(-(t - c) * 7) : 0;
       const approach = sm(t / .6);
       const red: V3 = [12.5, 141.01, lerp(zc - 4.6, zc - 1.3, approach) - hitK(1.5) * .35];
       const blueZ = t < 2.0 ? lerp(zc + 4.6, zc + 1.2, approach) + hitK(.8) * .35 + hitK(1.5) * .5 : zc + 1.2 + sm((t - 2.0) / .5) * 2.8;
-      f.actors.push({ slot: 0, pos: red, yaw: Math.PI, item: Item.IronSword, walk: stridePhase(t, 2), speed: t < .6 ? 3 : 1.5, attack: swingOf([.6, 1.3]) });
+      f.actors.push({ slot: 0, pos: red, yaw: Math.PI, item: Item.IronSword, walk: stridePhase(t, 2), speed: t < .6 ? 3 : 1.5, attack: swing([.6, 1.3]) });
       const drawing = t >= 2.0 && t < 2.7;
       f.actors.push({ slot: 1, pos: [12.5, 141.01, blueZ], yaw: 0, item: t < 1.95 ? Item.StoneSword : Item.BridgeBow, walk: stridePhase(t, 2), speed: t < .6 ? 3 : 0,
-        attack: t < 1.95 ? swingOf([.8, 1.5]) : 0, bow: drawing ? clamp01((t - 2.0) / .7) : t >= 2.7 && t < 2.85 ? 1 - (t - 2.7) / .15 : 0, aim: 1 });
+        attack: t < 1.95 ? swing([.8, 1.5]) : 0, bow: drawing ? clamp01((t - 2.0) / .7) : t >= 2.7 && t < 2.85 ? 1 - (t - 2.7) / .15 : 0, aim: 1 });
       if (t >= 2.7 && t < 3.05) {
         const u = (t - 2.7) / .35;
         f.projectiles.push({ pos: [12.5, 142.5, lerp(zc + 4.2, zc - 1.0, u)], dir: [0, 0, -1], kind: 'arrow' });
@@ -228,6 +183,112 @@ export function trailerFrame(s: Shot, t: number, env: Env): StageFrame {
       return f;
     }
 
+    // ── New classic shots (release v2) ───────────────────────────────────
+    case 'br-charge': {
+      // Deck-level, looking up the span: red charges at the lens while blue,
+      // foreground, draws and looses an arrow that whips past.
+      const camZ = lerp(24.6, 23.6, sm(k));
+      const f = emptyFrame({ position: vec([14.1, 141.45, camZ]), target: vec([12.2, 142.5 + sm(k) * .2, 36]), fov: 58 });
+      const redZ = Math.max(30.4, 40 - 3.4 * t);
+      const leap = t > 2.9 ? Math.sin(clamp01((t - 2.9) / .6) * Math.PI) * .9 : 0;
+      f.actors.push({ slot: 0, pos: [12.5, 141.01 + leap, redZ], yaw: 0, item: Item.IronSword, walk: stridePhase(t, 5.4) * 1.1, speed: redZ > 30.4 ? 5.4 : 0, attack: swingOf(t, [3.2], .32), pitch: .15 });
+      const draw = clamp01((t - .6) / 1.2);
+      f.actors.push({ slot: 1, pos: [12.5, 141.01, 28.3], yaw: Math.PI, item: Item.BridgeBow, walk: 0, speed: 0, bow: t < 2.2 ? draw : t < 2.35 ? 1 - (t - 2.2) / .15 : 0, aim: 1, pitch: .06 });
+      if (t >= 2.2 && t < 2.5) {
+        const u = (t - 2.2) / .3;
+        f.projectiles.push({ pos: [12.85, 142.45, lerp(28.9, 40, u)], dir: [0, 0, 1], kind: 'arrow' });
+      }
+      return f;
+    }
+    case 'br-score': {
+      // Reverse angle from inside the goal: blue sprints at the lens and dives into the portal.
+      const rise = sm((t - 1.7) / 1.1);
+      const f = emptyFrame({ position: vec([12.95, lerp(141.7, 143.5, rise), lerp(6.5, 6.25, sm(k))]), target: vec([12.45, lerp(142.4, 140.4, rise), lerp(16, 10.5, rise)]), fov: 70 });
+      const z = 24 - 6.0 * t;
+      if (t < 2.6) f.actors.push({ slot: 1, pos: [12.5, 141.01, Math.max(z, 8.4)], yaw: 0, item: Block.TeamWoolB, walk: stridePhase(t, 6) * 1.2, speed: 6 });
+      else {
+        const u = t - 2.6, y = 141.01 + (u < .2 ? 2.0 * u : .4 - (u - .2) * 7.5);
+        if (y > 138.6) f.actors.push({ slot: 1, pos: [12.5, y, Math.max(7.6, 8.4 - u * 2.4)], yaw: 0, item: Block.TeamWoolB, walk: stridePhase(t, 6), speed: 0, tilt: [-u * 1.4, 0, 0] });
+      }
+      return f;
+    }
+    case 'du-standoff': {
+      // Bullet time: the camera circles the two gunfighters as they trade bursts.
+      const ay = captureGround(env.generator, DUEL_A[0], DUEL_A[2], 110, 96, .01, 97.01), by = captureGround(env.generator, DUEL_B[0], DUEL_B[2], 110, 96, .01, 97.01);
+      const strafe = (p: V3, i: number): V3 => [p[0] + Math.sin(t * .9 + i * 2.4) * .55, i ? by : ay, p[2] + Math.cos(t * .8 + i) * .4];
+      const aP = strafe(DUEL_A, 0);
+      let bP = strafe(DUEL_B, 1);
+      const mid: V3 = [21.95, ay + 1.0, 22.0];
+      const ang = lerp(2.4, 2.4 + 4.1, sm(k * .96)), r = lerp(3.75, 3.2, sm(k));
+      const f = emptyFrame({ position: vec([mid[0] + Math.sin(ang) * r, mid[1] + lerp(.15, .75, sm(k)), mid[2] + Math.cos(ang) * r]), target: vec(mid), fov: 58 });
+      const redShots = [.8, 1.0, 1.2, 3.1, 3.3, 3.5, 4.8, 5.0, 5.2], blueShots = [1.9, 2.1, 2.3, 4.0, 4.2];
+      const kickOf = (times: number[]): number => times.reduce((m, c) => Math.max(m, t >= c ? Math.exp(-(t - c) * 14) : 0), 0);
+      let bTilt: V3 | undefined;
+      if (t >= 5.35) {
+        const u = t - 5.35;
+        bP = [bP[0] + 1.8 * u, bP[1] - u * 1.4 + (u < .25 ? u * 1.6 : 0), bP[2] - 1.5 * u];
+        bTilt = [-1.5 * u * 2, 0, .9 * u * 2];
+      }
+      f.actors.push({ slot: 0, pos: aP, yaw: face(aP, bP), item: Item.BurstRifle, walk: stridePhase(t, 2), speed: 2, aim: .7, kick: kickOf(redShots) * .4 });
+      f.actors.push({ slot: 1, pos: bP, yaw: face(bP, aP), item: Item.BurstRifle, walk: stridePhase(t, 2) + 2, speed: t >= 5.35 ? 0 : 2, aim: .7, kick: kickOf(blueShots) * .4, tilt: bTilt });
+      const bursts = (times: number[]): boolean => times.some(c => t >= c && t < c + .06);
+      if (bursts(redShots)) f.flashes.push(0);
+      if (bursts(blueShots)) f.flashes.push(1);
+      for (const [shots, from, to] of [[redShots, aP, bP], [blueShots, bP, aP]] as const) {
+        const hit = shots.find(c => t >= c && t < c + .08);
+        if (hit !== undefined) f.projectiles.push({ pos: [from[0], from[1] + 1.25, from[2]], dir: [to[0] - from[0], 0, to[2] - from[2]], kind: 'tracer' });
+      }
+      return f;
+    }
+    case 'pk-leap': {
+      // Long lens from the side: the pack leaps gap after gap with the dragon looming behind.
+      const runners = parkourRunners(t, env);
+      const lead = runners[0], mid = vec(runners[1].pos);
+      const norm = new THREE.Vector3(lead.dir[0], 0, lead.dir[2]).normalize();
+      const side = new THREE.Vector3(-norm.z, 0, norm.x);
+      const position = mid.clone().addScaledVector(side, 8.5).addScaledVector(norm, 1.5).add(new THREE.Vector3(0, 1.6, 0));
+      const target = mid.clone().add(new THREE.Vector3(0, 1.3, 0));
+      if (env.dragonHead) target.lerp(env.dragonHead, sm((t - 2.2) / 1.4) * .35);
+      const f = emptyFrame({ position, target, fov: 38 });
+      f.actors = runners.map(r => r.pose);
+      return f;
+    }
+    case 'pk-escape': {
+      // Drone chase: high behind the pack as they bound down the waterfall.
+      const runners = parkourRunners(t, env);
+      const lead = runners[0], mid = vec(runners[1].pos);
+      const norm = new THREE.Vector3(lead.dir[0], 0, lead.dir[2]).normalize();
+      const position = mid.clone().addScaledVector(norm, -lerp(7.5, 5.5, sm(k))).add(new THREE.Vector3(0, lerp(6.5, 4.2, sm(k)), 0));
+      const target = vec(lead.pos).addScaledVector(norm, 3).add(new THREE.Vector3(0, .6, 0));
+      const f = emptyFrame({ position, target, fov: 64 });
+      f.actors = runners.map(r => r.pose);
+      return f;
+    }
+    case 'rs-sneak': {
+      // Rat's-eye view: tucked in behind the cheese thief as it sprints for the door.
+      const run = t * 2.2;
+      const lead: V3 = [.6 - run * .04, 81, 24.6 - run];
+      const f = emptyFrame({ position: vec([lead[0] + .35, 81.32 + Math.sin(t * 14) * .02, lead[2] + 1.35]), target: vec([lead[0] - .1, 81.45, lead[2] - 4]), fov: 70 });
+      f.rats.push({ pos: lead, yaw: Math.PI - .04, speed: 5, phase: t * 9, caged: false, cheese: true });
+      f.rats.push({ pos: [lead[0] - .9, 81, lead[2] - 1.3 + Math.sin(t * 2) * .2], yaw: Math.PI + .1, speed: 5, phase: t * 9 + 2, caged: false });
+      f.rats.push({ pos: [lead[0] + .2, 81, Math.max(14.3, lead[2] - 1.7)], yaw: Math.PI - .15, speed: 5, phase: t * 9 + 4, caged: false });
+      // The seeker in the doorway wheels round and steps out.
+      const seeker: V3 = [1.2, 81, Math.min(15.4, 14.5 + Math.max(0, t - 2.2) * .9)];
+      f.actors.push({ slot: 5, pos: seeker, yaw: lerp(Math.PI * .9, 0, sm((t - 1.6) / .7)), item: Item.RatCatcher, walk: stridePhase(t, 1.5), speed: t > 2.2 ? 1.5 : 0, attack: swingOf(t, [3.3], .35) });
+      f.cat = { pos: [-2.6, 81, 19.5], yaw: 2.6 + sm((t - 2) / .6) * .8, speed: 0, sit: t < 2.4 };
+      return f;
+    }
+    case 'rs-catch': {
+      // Over the seeker's shoulder down the hall: one lunge, one rat caught, two get away.
+      const sz = 10.0 - 3.6 * t;
+      const seeker: V3 = [-.45, 81, sz];
+      const f = emptyFrame({ position: vec([.85, 82.55, sz + 1.6]), target: vec([-.2, 81.6, sz - 4]), fov: 66 });
+      f.actors.push({ slot: 5, pos: seeker, yaw: 0, item: Item.RatCatcher, walk: stridePhase(t, 4.8) * 1.3, speed: 4.8, attack: swingOf(t, [1.45], .4) });
+      [0, 1].forEach(i => f.rats.push({ pos: [i ? -1.05 : .65, 81, 7.0 - 4.3 * t + i * 1.1], yaw: 0, speed: 5.5, phase: t * 9 + i, caged: false, cheese: i === 0 }));
+      if (t < 1.62) f.rats.push({ pos: [-.2 + Math.sin(t * 3) * .3, 81, 8.8 - 3.4 * t], yaw: 0, speed: 5, phase: t * 9 + 3, caged: false });
+      return f;
+    }
+
     // ── Rat and Seek ─────────────────────────────────────────────────────
     case 'rs-manor': {
       const f = emptyFrame(camOf([9.6, 83.6, 33.2], [3.4, 82.0, 27.2], [1.2, 81.5, 20.8], 54, k));
@@ -270,6 +331,7 @@ export function trailerFrame(s: Shot, t: number, env: Env): StageFrame {
       return f;
     }
   }
+  throw new Error(`No staging for ${s.action}`);
 }
 
 // ── Parkour helpers ─────────────────────────────────────────────────────────

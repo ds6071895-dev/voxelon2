@@ -45,12 +45,12 @@ def upload(run: str, repo: str, tag: str):
         for file in sorted((root / 'screenshots').glob('*.png')):
             archive.write(file, f'screenshots/{file.name}')
         archive.write(root / 'worlds-title-logo.svg', 'worlds-title-logo.svg')
-    music_zip = Path('/tmp/worlds-awaken-original-score.zip')
+    music_zip = Path('/tmp/worlds-rising-original-score.zip')
     with zipfile.ZipFile(music_zip, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
         for file in sorted((root / 'audio').iterdir()):
             if file.suffix in {'.wav', '.m4a', '.json'}:
                 archive.write(file, file.name)
-    assets = [root / 'video/worlds-november-2026-trailer.mp4', screenshot_zip, music_zip, root / 'verification.json']
+    assets = [root / 'video/worlds-release-trailer.mp4', screenshot_zip, music_zip, root / 'verification.json']
     urls = []
     for file in assets:
         existing = next((a for a in release['assets'] if a['name'] == file.name), None)

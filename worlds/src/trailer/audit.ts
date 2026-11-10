@@ -6,7 +6,7 @@ import { DragonView } from '../parkour_dragon';
 import type { Particles } from '../particles';
 import { parkourTheme } from '../parkour_themes';
 import { SHOTS } from './shots';
-import { createTrailerCourse, trailerShotContext, trailerFrame, trailerEdits, trailerDragonCue } from './staging';
+import { createTrailerCourse, trailerShotContext, trailerFrame, trailerEdits, trailerDragonCue, trailerWorld, useTrailerLake } from './staging';
 import { warmCaptureDragon } from '../media/dragon';
 import { captureVolumeHit, captureSightHit, type GeometryHit, type GeometryPoint } from '../media/geometry';
 
@@ -22,17 +22,28 @@ export function checkTrailerLocations(): TrailerLocationReport {
   const { seed, course } = createTrailerCourse();
   const report: TrailerLocationReport = { seed, frames: 0, failures: [], observations: [] };
   const lake = new TitleTerrain(0x5ca1ab1e);
+  useTrailerLake(lake);
   const particles = { update() {}, burst() {} } as unknown as Particles;
   const dragon = new DragonView(new THREE.Scene(), particles);
   const view = new THREE.PerspectiveCamera(58, 16 / 9, .08, 2000);
   for (const s of SHOTS) {
-    const base = s.set === 'lake' ? lake : worldGenerator({ kind: s.set === 'manor' ? 'ratseek' : s.set, seed: seed });
+    const spec = trailerWorld(s.set, seed);
+    const base = spec === 'lake' ? lake : worldGenerator(spec);
     // Blocks placed during the shot are part of the scene at the moment they appear.
     const edits = trailerEdits(s);
     let clock = 0;
+    const byCell = new Map<string, [number, number][]>();
+    for (const [ex, ey, ez, block, at] of edits) {
+      const key = `${ex},${ey},${ez}`;
+      const list = byCell.get(key) ?? [];
+      list.push([at, block]); byCell.set(key, list);
+    }
     const generator = { ...base, bounds: base.bounds, blockAt: (x: number, y: number, z: number): number => {
-      for (const [ex, ey, ez, block, at] of edits) if (ex === x && ey === y && ez === z && at <= clock) return block;
-      return base.blockAt(x, y, z);
+      const list = byCell.get(`${x},${y},${z}`);
+      let id = base.blockAt(x, y, z);
+      // The latest edit that has happened by now wins (a mole pops up, then down).
+      if (list) for (const [at, block] of list) if (at <= clock) id = block;
+      return id;
     } } as typeof base;
     const context = trailerShotContext(s, course);
     dragon.clear();
@@ -61,7 +72,7 @@ export function checkTrailerLocations(): TrailerLocationReport {
     for (let frame = 0; frame <= s.duration * 60; frame++) {
       const t = frame / 60;
       clock = t;
-      if (s.action === 'pk-run' || s.action === 'pk-dragon') {
+      if (s.set === 'parkour' && s.action !== 'pk-finish') {
         const cue = trailerDragonCue(t, context.firstOrder);
         dragon.sync(cue.front, cue.speed, cue.now);
         dragon.update(frame ? 1 / 60 : 0, cue.now, 0, true);
@@ -71,7 +82,7 @@ export function checkTrailerLocations(): TrailerLocationReport {
       const p = cam.position;
       // Near-plane-scale clearance, not a player-sized bubble: these are
       // intentionally close cinematic cameras. Sweep between frames as well.
-      const from = previous ?? p;
+      const from = previous && !cam.cut ? previous : p;
       const clearance = captureVolumeHit(generator,
         [Math.min(from.x, p.x) - .08, Math.min(from.y, p.y) - .08, Math.min(from.z, p.z) - .08],
         [Math.max(from.x, p.x) + .08, Math.max(from.y, p.y) + .08, Math.max(from.z, p.z) + .08]);
@@ -98,7 +109,7 @@ export function checkTrailerLocations(): TrailerLocationReport {
           subjects.push(new THREE.Vector3(x, y + .5, z));
         }
       }
-      if (s.action === 'pk-dragon') subjects.push(dragon.headPosition().clone());
+      if (s.action === 'pk-dragon' || s.action === 'pk-leap') subjects.push(dragon.headPosition().clone());
       // Establishing shots aim into real builds, sometimes deliberately at a
       // roof/floor. Record aim occlusion and bound uninterrupted action occlusion.
       const aimHit = captureSightHit(generator, p.toArray() as GeometryPoint, cam.target.toArray() as GeometryPoint);

@@ -13,7 +13,7 @@ const frameCount = expectedFrames(manifest);
 if (manifest.frameCount !== frameCount) throw new Error('Manifest frame count does not match its shot timeline');
 const ffmpeg = process.env.FFMPEG ?? 'ffmpeg';
 const video = mediaPath(directory, manifest.video);
-await requireFiles(directory, [manifest.video, ...Object.values(manifest.audio ?? { music: 'audio/worlds-awaken.wav', listening: 'audio/worlds-awaken.m4a', mix: 'audio/trailer-final-mix.wav' })]);
+await requireFiles(directory, [manifest.video, ...Object.values(manifest.audio ?? { music: 'audio/worlds-rising.wav', listening: 'audio/worlds-rising.m4a', mix: 'audio/trailer-final-mix.wav' })]);
 const result = await run(ffmpeg, ['-hide_banner', '-i', video, '-vf', 'blackdetect=d=0.5:pic_th=0.99:pix_th=0.03', '-af', 'loudnorm=I=-14:TP=-1:LRA=11:print_format=json', '-f', 'null', '-'], { collect: true });
 const frames = [...result.matchAll(/frame=\s*(\d+)/g)].at(-1)?.[1];
 if (Number(frames) !== frameCount) throw new Error(`Decoded ${frames} frames; expected ${frameCount}.`);

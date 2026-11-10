@@ -1555,7 +1555,11 @@ net.onMArena = (spec, mode, spawn, yaw, health) => {
   const keep = vClient.active && vClient.mode === mode;
   enterMatchWorld(spec, 'mg', mode, spawn);
   if (!keep) vClient.enter(mode, spec);
-  if (mode === 'pillars') world.setArenaRenderBounds(LP_BOUNDS, 0.9);
+  // The vanilla modes take Minecraft's brighter light curve, plus a floor so
+  // no room or overhang goes cave-dark (Disaster City's is low: its storms
+  // and subway should still feel dim; open Party Games arenas match Duels).
+  if (mode === 'pillars') world.setArenaRenderBounds(LP_BOUNDS, 0.9, true);
+  else world.setArenaRenderBounds(world.bounds, mode === 'disaster' ? 0.6 : 0.8, true);
 };
 net.onM = (d) => { if (match?.kind === 'mg') vClient.payload(d); };
 window.addEventListener('keydown', e => {

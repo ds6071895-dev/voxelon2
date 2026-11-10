@@ -2,7 +2,7 @@
 // Requires Playwright/Chromium and FFmpeg; they may live outside the project.
 // PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs FFMPEG=/path/to/ffmpeg npm run trailer
 // Options: --stills-only --video-only --width=1920 --height=1080 --fps=30
-//          --stills-width=3840 --quality=balanced --output=release-media/revised
+//          --stills-width=1920 --quality=balanced --output=release-media/revised
 import { mkdir, writeFile, open } from 'node:fs/promises';
 import path from 'node:path';
 import { browserSession, observeErrors, assertBrowserErrors } from './browser_session.mjs';
@@ -19,7 +19,7 @@ await mkdir(path.join(out, 'audio'), { recursive: true });
 
 let session, file;
 const errors = [];
-const manifest = { release: 'November 2026', logo: 'Exact SVG from title screen', music: 'Worlds Awaken — original composition', capture: 'Staged in-engine cinematic, using Worlds generators and models', width, height, fps, quality, screenshots: [] };
+const manifest = { release: 'November 2026', rpg: 'February 2027, a separate launch from Worlds (early access starting soon)', logo: 'Exact SVG from title screen', music: 'Worlds Rising — original composition', capture: 'Staged in-engine cinematic, using Worlds generators and models', width, height, fps, quality, screenshots: [] };
 try {
   session = await browserSession({ port: process.env.TRAILER_PORT ?? 5184, capture: true });
   const { browser, base } = session;
@@ -31,9 +31,9 @@ try {
   const initError = await page.evaluate(() => document.body.dataset.error);
   if (initError) throw new Error(initError);
   await page.evaluate(() => window.__trailer.setExporting(true));
-  const { shots, screenshots, duration, seed, logoSVG } = await page.evaluate(() => {
+  const { shots, screenshots, heroFrames, duration, seed, logoSVG } = await page.evaluate(() => {
     const a = window.__trailer;
-    return { shots: a.shots, screenshots: a.screenshots, duration: a.duration, seed: a.seed, logoSVG: a.logoSVG };
+    return { shots: a.shots, screenshots: a.screenshots, heroFrames: a.heroFrames, duration: a.duration, seed: a.seed, logoSVG: a.logoSVG };
   });
   Object.assign(manifest, { duration, seed, shots });
   const expectedFrames = frameExpectation(manifest, selected);
@@ -51,10 +51,10 @@ try {
   };
   if (!args.has('--video-only')) {
     for (const s of screenshots) await savePNG(s.name, s.shot, s.time);
-    await savePNG('15-worlds-release-hero', 0, 2.5, true);
-    await savePNG('16-bridge-release-hero', 2, 2.0, true);
-    await savePNG('17-trailer-thumbnail', 2, 2.0, true, 1280);
-    await savePNG('18-release-end-card', 13, 4.4, false, 1920, false);
+    await savePNG('14-worlds-release-hero', heroFrames.worlds.shot, heroFrames.worlds.time, true);
+    await savePNG('15-trailer-thumbnail', heroFrames.thumbnail.shot, heroFrames.thumbnail.time, true, 1280);
+    await savePNG('16-release-end-card', heroFrames.endCard.shot, heroFrames.endCard.time, false, 1920, false);
+    await savePNG('17-rpg-announcement', heroFrames.rpgCard.shot, heroFrames.rpgCard.time, false, 1920, false);
   }
   if (!args.has('--stills-only')) {
     const config = { codec: 'vp09.00.40.08', width, height, bitrate: 12_000_000, framerate: fps, latencyMode: 'realtime', hardwareAcceleration: 'prefer-software' };

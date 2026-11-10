@@ -20,6 +20,19 @@ export function setMinigamesHostSheet(fn: (() => void) | null): void { openHostS
 
 const ordinal = (n: number) => `${n}${n % 100 >= 11 && n % 100 <= 13 ? 'th' : n % 10 === 1 ? 'st' : n % 10 === 2 ? 'nd' : n % 10 === 3 ? 'rd' : 'th'}`;
 
+/** Warm late afternoon: the sun low and golden but still well up. */
+const GOLDEN_HOUR = .43;
+
+/** Minecraft ticks (6000 noon, 12000 sunset) to the sky's hour (.25 noon, .5
+ *  sunset). The source's sunset games sit at 12000-14000 ticks, which on this
+ *  sky is already after dark, so the arenas read as murky night: they play in
+ *  golden late afternoon instead. Genuinely night games (18000) stay night. */
+export function mgSkyHour(mcTime: number): number {
+  const t = ((mcTime % 24000) + 24000) % 24000;
+  if (t >= 11000 && t < 15000) return GOLDEN_HOUR;
+  return t / 24000;
+}
+
 class MinigamesPresenter implements ModePresenter {
   private s: MinigamesState | null = null;
   private brief: HTMLElement | null = null;
@@ -67,11 +80,10 @@ class MinigamesPresenter implements ModePresenter {
     if (s.phase === 'podium' && !this.finalAt) this.finalAt = performance.now() + 9000;
   }
   frozen(): boolean { return this.s?.phase === 'brief' || this.s?.phase === 'countdown'; }
-  /** Minecraft ticks (6000 noon) to the sky's hour (.25 noon, .5 sunset). */
   timeOfDay(): number {
     const s = this.s;
     const mcTime = !s ? 6000 : s.phase === 'podium' || !s.game ? PODIUM_TIME : mgGame(s.game)?.time ?? 6000;
-    return (mcTime / 24000) % 1;
+    return mgSkyHour(mcTime);
   }
 
   frame(): void {
