@@ -131,7 +131,7 @@ export class HUD {
       this.slots[i].classList.toggle('empty', !stack);
       this.slots[i].setAttribute('aria-label', stack ? ITEMS[stack.id]?.name ?? 'Item' : 'Empty slot');
       if (stack) {
-        renderItemIcon(this.icons[i], this.atlasCanvas, stack.id);
+        renderItemIcon(this.icons[i], this.atlasCanvas, stack.id, stack);
         this.counts[i].textContent = stack.count > 1 ? String(stack.count) : '';
       } else {
         clearItemIcon(this.icons[i]);

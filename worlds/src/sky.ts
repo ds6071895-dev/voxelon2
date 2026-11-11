@@ -175,6 +175,9 @@ const DOME_FRAG = /* glsl */`
   uniform vec3 uNightBase;
   uniform vec3 uHorizonFog;
   uniform vec3 uHorizonFogSun;
+  uniform float uVoid;
+  uniform vec3 uVoidHorizon;
+  uniform vec3 uVoidBottom;
   uniform float uNight;
   uniform float uHDR;
   uniform float uTime;
@@ -398,7 +401,14 @@ const DOME_FRAG = /* glsl */`
     float sunward = pow(max(dot(dir, normalize(vec3(uSunDir.x, 0.0, uSunDir.z) + vec3(0.0, 1e-4, 0.0))), 0.0), 5.0);
     vec3 horizonFog = (uHorizonFog + uHorizonFogSun * sunward)
       * mix(0.62, 1.0, smoothstep(-0.18, 0.0, dir.y));
-    color = mix(horizonFog, color, smoothstep(0.0, 0.24, dir.y));
+    if (uVoid > 0.5) {
+      // A void arena has no ground to fade into: the sky carries on below
+      // the skyline, pale at the horizon and clear blue straight down.
+      vec3 below = mix(uVoidHorizon, uVoidBottom, smoothstep(0.0, 0.7, -dir.y));
+      color = mix(below, color, smoothstep(-0.01, 0.12, dir.y));
+    } else {
+      color = mix(horizonFog, color, smoothstep(0.0, 0.24, dir.y));
+    }
     gl_FragColor = vec4(color, 1.0);
     #include <colorspace_fragment>
   }
@@ -557,6 +567,8 @@ export class Sky {
   /** Distance fog colour: the horizon washed paler and greyer, so the render
    *  edge reads as a bank of mist rather than terrain dissolving into sky. */
   readonly hazeColor = new THREE.Color();
+  /** Void arenas (no terrain below): the dome's colour straight down. */
+  readonly voidBottom = new THREE.Color();
   /** Zenith colour — what an upward-facing mirror (calm water) sees. */
   readonly zenithColor = new THREE.Color();
   /** Night-only aurora strength. Also drives its subtle light on terrain. */
@@ -611,6 +623,9 @@ export class Sky {
         uNightBase: { value: new THREE.Vector3(...NIGHT_BASE) },
         uHorizonFog: { value: this.hazeColor },
         uHorizonFogSun: { value: this.fogSunColor },
+        uVoid: { value: 0 },
+        uVoidHorizon: { value: this.skyColor },
+        uVoidBottom: { value: this.voidBottom },
         uNight: { value: 0 },
         uHDR: { value: 0 },
         uTime: { value: 0 },
@@ -661,6 +676,9 @@ export class Sky {
   /** Switch between the HDR shader stack (`max`: volumetric clouds, full-range
    *  sun, tone-mapped later by PostFX) and the plain presets (display-knee'd
    *  here, because nothing downstream will tone-map). */
+  /** Void arenas: paint the lower dome as more sky, not a dim far ground. */
+  setVoid(on: boolean): void { this.domeMat.uniforms.uVoid.value = on ? 1 : 0; }
+
   setShaders(on: boolean): void {
     this.hdr = on;
     this.clouds.material = on ? this.cloudShaderMat : this.cloudFlatMat;
@@ -823,6 +841,8 @@ export class Sky {
       this.hazeColor.setRGB(
         Math.min(1, this.hazeColor.r), Math.min(1, this.hazeColor.g), Math.min(1, this.hazeColor.b));
     }
+
+    this.voidBottom.copy(this.zenithColor).lerp(this.skyColor, 0.45);
 
     // ── Feed the dome ─────────────────────────────────────────────────────
     const u = this.domeMat.uniforms;

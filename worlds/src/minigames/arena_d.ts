@@ -23,7 +23,7 @@ const TOP=10,ZONE=2;
                 d.set(x, 0, z, top);
             }
         }
-        d.underside(0, -1, 0, R, 10, 'sandstone', 'sand', 'terracotta');
+        d.underside(0, -1, 0, R, 10, 'sandstone', 'sand', 'sandstone');
         // Perimeter wall around the plaza so nobody walks off.
         for (let a = 0; a < 720; a++) {
             let angle = Math.PI * 2 * a / 720;
@@ -52,7 +52,9 @@ const TOP=10,ZONE=2;
         for (let side = 0; side < 4; side++) {
             let facing = [N, E, S, W][side];
             let f = step(facing);
-            for (let along = 3; along <= 11; along++) {
+            // Down to along 12, so the bottom stair sits on the plaza: every
+            // step is a half block and auto-steps (no jump at the foot).
+            for (let along = 3; along <= 12; along++) {
                 let height = 13 - along;
                 for (let across = -1; across <= 1; across++) {
                     let x = f[0] * along + (f[0] == 0 ? across : 0);
@@ -74,15 +76,6 @@ const TOP=10,ZONE=2;
             }
         }
         d.set(0, TOP, 0, 'gold_block');
-        // Red banners down the tiers between the stairs.
-        for (let tier = 0; tier < 4; tier++) {
-            let half = 10 - tier * 2;
-            for (const p of [[-half + 1, half], [half - 1, half], [-half + 1, -half], [half - 1, -half]]) {
-                let facing = p[1] > 0 ? S : N;
-                let f = step(facing);
-                d.wallBanner(p[0], tier * 2 + 2, p[1] + f[2], "red", facing);
-            }
-        }
         // Slime launch pads at the diagonals of the plaza.
         for (const p of [[14, 14], [-14, 14], [14, -14], [-14, -14]]) {
             for (let dx = 0; dx <= 1; dx++) {
@@ -115,10 +108,7 @@ const TOP=10,ZONE=2;
             d.data(p[0], 1, p[1] + 1, "lily_pad");
         }
         d.stall(0, 1, 31, N, "orange", "white", 'birch_fence');
-        d.stall(0, 1, -31, S, "red", "white", 'birch_fence');
-        for (const p of [[-8, 22], [8, 22], [-8, -22], [8, -22], [22, -8], [22, 8], [-22, 8], [-22, -8]]) {
-            d.data(p[0], 1, p[1], "decorated_pot[facing=north]");
-        }
+        d.stall(0, 1, -31, S, "lime", "white", 'birch_fence');
     }
 
     /** A palm: a gently leaning trunk with drooping fronds. */

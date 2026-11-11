@@ -112,6 +112,8 @@ export interface ItemStack {
   count: number;
   /** Rounds currently in a gun's magazine (guns only; undefined = full). */
   loaded?: number;
+  /** Vanilla potions: the effect colour their icon is tinted with. */
+  potion?: { color: number };
 }
 
 function blockItem(block: Block): ItemInfo {

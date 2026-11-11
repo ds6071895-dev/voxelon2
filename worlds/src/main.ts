@@ -1563,7 +1563,7 @@ net.onMArena = (spec, mode, spawn, yaw, health) => {
 };
 net.onM = (d) => { if (match?.kind === 'mg') vClient.payload(d); };
 window.addEventListener('keydown', e => {
-  if (match?.kind !== 'mg' || screens.state !== 'playing' || e.repeat || vClient.panelOpen) return;
+  if (e.defaultPrevented || match?.kind !== 'mg' || screens.state !== 'playing' || e.repeat || vClient.panelOpen) return;
   if (e.code === 'KeyE') { e.preventDefault(); vClient.openInventory(); }
   if (e.code === 'KeyF') { e.preventDefault(); net.sendM({ k: 'swapHands' }); }
 });
@@ -2115,6 +2115,8 @@ function frame(): void {
   }
   const tod = match.kind === 'pg' && pgSub ? parkourTheme(pgSub.seed).time : match.kind === 'rs' ? RS_TIME_OF_DAY
     : match.kind === 'mg' ? vClient.presenter?.timeOfDay?.() ?? 0.25 : 0.25;
+  // Lucky Pillars floats in the void: the sky carries on below the skyline.
+  sky.setVoid(match.kind === 'mg' && vClient.mode === 'pillars');
   sky.update(dt, activeCamera, tod);
   updateAtmosphere(activeCamera);
   particles.update(dt, activeCamera);

@@ -18,7 +18,6 @@ import type { MAction } from './vanilla/messages';
 import type { MinigamesMatch } from './minigames';
 import { BASE_Y } from './minigames/arena';
 import { WhackAMole, holeX, holeZ } from './minigames/whack';
-import { CarnivalShootout, WALL_Z as SHOOT_WALL, DUCK_Z } from './minigames/shootout';
 import { MemoryMosaic, PAD, padX, padZ, SIZES } from './minigames/memory';
 import { BrainRush, CENTRES } from './minigames/brain';
 import { KingOfTheHill } from './minigames/hill';
@@ -116,7 +115,6 @@ export class MgBot {
     const g = m.current;
     if (m.phase === 'round' && g && g.alive.has(this.id) && !p.spectator) {
       if (g instanceof WhackAMole) this.whack(g, actions);
-      else if (g instanceof CarnivalShootout) this.shootout(g, actions);
       else if (g instanceof MemoryMosaic) this.memory(g, actions);
       else if (g instanceof BrainRush) this.brain(g);
       else if (g instanceof TreasureCove) this.treasure(g, actions);
@@ -226,75 +224,6 @@ export class MgBot {
     if (aimed && this.eyeDist(tx, BASE_Y + 2.5, tz) < 4.4 && this.ready()) {
       this.click(holeX(best), BASE_Y + 2, holeZ(best), actions);
       this.wait(lerp(.6, .2, this.s));
-    }
-  }
-
-  // ── Carnival Shootout ───────────────────────────────────────────────────
-
-  /** Pitch that lands an arrow `dist` away and `rise` higher, fully drawn (3 b/tick). */
-  private bowPitch(dist: number, rise: number): { pitch: number; ticks: number } {
-    let best = { pitch: 0, ticks: 0, err: Infinity };
-    for (let deg = -10; deg <= 25; deg += .25) {
-      const a = deg * Math.PI / 180;
-      let x = 0, y = -.1, vx = Math.cos(a) * 3, vy = Math.sin(a) * 3;
-      x += Math.cos(a) * .3; y += Math.sin(a) * .3;
-      let t = 0;
-      while (x < dist && t < 60) { x += vx; y += vy; vx *= .99; vy *= .99; vy -= .05; t++; }
-      const err = Math.abs(y - rise);
-      if (err < best.err) best = { pitch: a, ticks: t, err };
-    }
-    return best;
-  }
-  private shootout(g: CarnivalShootout, actions: (() => void)[]): void {
-    const p = this.match.sim.players.get(this.id)!;
-    const b = this.body.pos;
-    this.select(0, actions);
-    type Aim = { x: number; y: number; z: number; key: string };
-    let aim = this.mem.aim as Aim | undefined;
-    const drawing = p.using !== null;
-    const stillThere = (a: Aim) => a.key.startsWith('d') || g.targets.has(Number(a.key));
-    if (!aim || !stillThere(aim)) {
-      // Pick: gold first, never TNT on purpose, nearest to where we look.
-      let bestScore = -Infinity, choice: Aim | undefined;
-      for (const [k, tg] of g.targets) {
-        if (tg.type === 'tnt' && this.rng() > (1 - this.s) * .05) continue;
-        if ((tg.expires - g.t) / 20 < 1.6) continue;
-        // A weaker bot takes whatever is near its aim; a stronger one hunts gold.
-        const sc = (tg.type === 'gold_block' ? 3 : 1) * 3 * this.s - Math.abs(tg.x - b.x) * .15 + this.rng() * 3;
-        if (sc > bestScore) { bestScore = sc; choice = { x: tg.x + .5, y: BASE_Y + tg.y + .5, z: SHOOT_WALL + 1, key: String(k) }; }
-      }
-      for (const d of g.ducks) {
-        if (d[2] < 0 || this.s < .6) continue;
-        const sc = (d[2] === 1 ? 5 : 2) * 2.4 * (this.s - .3) + this.rng() * 3 - 3;
-        if (sc > bestScore) { bestScore = sc; choice = { x: d[0] + .5, y: BASE_Y + 2.5, z: DUCK_Z + .5, key: `d${d[0]}@${d[1]}` }; }
-      }
-      aim = choice;
-      this.mem.aim = aim;
-      this.mem.err = { yaw: (this.rng() - .5) * lerp(.17, .02, this.s), pitch: (this.rng() - .5) * lerp(.13, .016, this.s) };
-      if (!aim) return;
-    }
-    // Ducks move a block every 5 ticks: lead by the flight time.
-    let ax = aim.x;
-    if (aim.key.startsWith('d')) {
-      const [xs, dir] = aim.key.slice(1).split('@').map(Number);
-      const duck = g.ducks.find((d) => d[2] >= 0 && d[1] === dir && Math.abs(d[0] - xs) <= 6);
-      if (!duck) { this.mem.aim = undefined; return; }
-      const dist = Math.hypot(duck[0] + .5 - b.x, DUCK_Z + .5 - b.z);
-      ax = duck[0] + .5 + duck[1] * (dist / 3 + 4) / 5;
-    }
-    const dist = Math.hypot(ax - b.x, aim.z - b.z);
-    const sol = this.bowPitch(dist, aim.y - (b.y + 1.62));
-    const err = this.mem.err as { yaw: number; pitch: number };
-    const yaw = Math.atan2(-(ax - b.x), -(aim.z - b.z)) + err.yaw;
-    this.turn(yaw, sol.pitch + err.pitch, lerp(5, 14, this.s));
-    const aimed = Math.abs(angleTo(this.body.yaw, yaw)) < .02 && Math.abs(this.pitch - sol.pitch - err.pitch) < .02;
-    if (!drawing && this.ready()) {
-      actions.push(() => this.act({ k: 'use', slot: 0, yaw: this.body.yaw, pitch: this.pitch }));
-      this.mem.drawAt = this.time;
-    } else if (drawing && aimed && this.time - ((this.mem.drawAt as number) ?? 0) >= 1.05) {
-      actions.push(() => this.act({ k: 'useEnd', slot: 0, yaw: this.body.yaw, pitch: this.pitch }));
-      this.mem.aim = undefined;
-      this.wait(this.react(.6));
     }
   }
 

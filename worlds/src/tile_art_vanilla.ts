@@ -7,6 +7,7 @@ import {
   type Paint, type RGBA, CLEAR, Grid, bricks, hex, leaves, logTop, barkSide, mix, pick, planks, rnd, tfbm, tnoise,
 } from './tile_art';
 import { VANILLA_TILE_STYLES, type TileStyle } from './vanilla/tiles';
+import { ITEM_TEMPLATES, OVERLAY_TEMPLATES } from './item_sprites';
 
 const N = 16;
 const pal = (hs: number[]): RGBA[] => hs.map((h) => hex(h));
@@ -403,8 +404,53 @@ const SHAPES: Record<string, Shape> = {
   bowl: (g, P) => { for (let y = 8; y <= 12; y++) { const w = 6 - (y - 8); for (let x = Math.round(7.5 - w); x <= Math.round(7.5 + w); x++) g.put(x, y, lit(P, x, y, 7, 9)); } },
 };
 
+/** Liquid colours for the bucket variants (the template's 'L'). */
+const BUCKET_FILL: Record<string, number> = {
+  bucket_water: 0x3a70d8, bucket_lava: 0xf07a14, bucket_milk: 0xf6f6f2, bucket_snow: 0xe2ecf8,
+};
+const darker = (c: RGBA, k: number): RGBA => [c[0] * k, c[1] * k, c[2] * k, c[3]];
+/** A hand-drawn template (item_sprites.ts) painted in the material ramp. */
+function templated(shape: string, P: RGBA[]): Paint | null {
+  const fill = BUCKET_FILL[shape];
+  const t = ITEM_TEMPLATES[fill !== undefined ? 'bucket' : shape];
+  if (!t) return null;
+  const extra: Record<string, RGBA> = {};
+  for (const [k, v] of Object.entries(t.x ?? {})) extra[k] = hex(v);
+  if (fill !== undefined) extra.L = hex(fill);
+  const ramp = (k: number) => P[Math.round((k - 1) / 5 * (P.length - 1))];
+  const outline = mix(OUTLINE, darker(P[0], .55), .35);
+  return (c) => {
+    const g = new Grid();
+    t.rows.forEach((row, y) => {
+      for (let x = 0; x < N; x++) {
+        const ch = row[x];
+        if (ch === '.' || ch === undefined) continue;
+        const col = ch >= '1' && ch <= '6' ? ramp(+ch) : ch >= 'a' && ch <= 'd' ? handle[ch.charCodeAt(0) - 97]
+          : ch === 'o' ? outline : extra[ch];
+        if (col) g.put(x, y, col);
+      }
+    });
+    if (!t.noOutline) g.outline(outline);
+    g.to(c);
+  };
+}
+/** Greyscale tint mask: grey levels the icon renderer multiplies by a colour. */
+function overlay(spec: { from: string; levels: Record<string, number> }): Paint {
+  const rows = ITEM_TEMPLATES[spec.from].rows;
+  return (c) => c.fill((x, y) => {
+    const k = spec.levels[rows[y][x]];
+    if (!k) return CLEAR;
+    const v = Math.round(255 * (.55 + (k - 1) * .09));
+    return [v, v, v, 255];
+  });
+}
+
 function sprite(shape: string, p: number[]): Paint {
-  const P = pal(p), draw = SHAPES[shape] ?? SHAPES.lump;
+  if (OVERLAY_TEMPLATES[shape]) return overlay(OVERLAY_TEMPLATES[shape]);
+  const P = pal(p);
+  const hand = templated(shape, P);
+  if (hand) return hand;
+  const draw = SHAPES[shape] ?? SHAPES.lump;
   return (c, seed) => {
     const g = new Grid();
     draw(g, P, seed);

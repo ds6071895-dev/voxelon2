@@ -188,9 +188,16 @@ export function clearItemIcon(icon: HTMLCanvasElement): void {
   prepareIconCanvas(icon, false);
 }
 
+/** Tinted layers drawn over an item's flat sprite: [atlas tile, CSS colour].
+ *  The vanilla modes register one (potion liquid, spawn egg colours). */
+type IconOverlays = (itemId: number, stack: { potion?: { color: number } } | undefined) => [number, string][] | null;
+let iconOverlays: IconOverlays | null = null;
+export function setIconOverlays(fn: IconOverlays | null): void { iconOverlays = fn; }
+
 /** Draw an item's icon into a 32x32 canvas. */
 export function renderItemIcon(
-  icon: HTMLCanvasElement, atlasCanvas: HTMLCanvasElement, itemId: number
+  icon: HTMLCanvasElement, atlasCanvas: HTMLCanvasElement, itemId: number,
+  stack?: { potion?: { color: number } }
 ): void {
   const info = ITEMS[itemId];
   // 3D-rendered icons (guns, gadgets) get a
@@ -222,6 +229,9 @@ export function renderItemIcon(
     const tint = block?.tint === 'grass' ? ICON_GRASS : null;
     // An exact 2x of the 16px art, so every art pixel is the same size.
     ctx.drawImage(tileSource(atlasCanvas, tile, tint), 0, 0, 32, 32);
+    for (const [layer, color] of iconOverlays?.(itemId, stack) ?? []) {
+      ctx.drawImage(tileSource(atlasCanvas, layer, color), 0, 0, 32, 32);
+    }
     return;
   }
 

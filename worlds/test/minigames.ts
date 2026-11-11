@@ -17,7 +17,6 @@ import { mgIndex } from '../src/minigames_rules';
 import { BASE_Y } from '../src/minigames/arena';
 import { BoatRush, BOAT_LAPS } from '../src/minigames/boat';
 import { WhackAMole } from '../src/minigames/whack';
-import { CarnivalShootout } from '../src/minigames/shootout';
 import { TreasureCove, HALF, DEPTH } from '../src/minigames/treasure';
 import { generate } from '../src/minigames/brain';
 import '../src/net/engine_modes';
@@ -76,7 +75,7 @@ export function runMinigamesTests(): number {
 
   t('the selection bag (PartyRulesCheck.selection)', () => {
     const pool: MgEntry[] = MG_GAMES.map((g) => ({ id: g.id, category: g.category }));
-    assert.equal(pool.length, 23);
+    assert.equal(pool.length, 22);
     const rng = mulberry32(42);
     for (const length of MG_LENGTHS) {
       const recent: string[] = [];
@@ -99,8 +98,8 @@ export function runMinigamesTests(): number {
     const recent: string[] = [];
     const seen = new Set<string>();
     for (let match = 0; match < 12; match++) { const p = pick(pool, 3, recent, new Set(), rng); p.forEach((e) => seen.add(e.id)); remember(recent, p); }
-    assert.ok(seen.size >= 23, `every game within 12 three-game matches (saw ${seen.size})`);
-    const banned = new Set(pool.slice(0, 15).map((e) => e.id));
+    assert.ok(seen.size >= 22, `every game within 12 three-game matches (saw ${seen.size})`);
+    const banned = new Set(pool.slice(0, 14).map((e) => e.id));
     const limited = pick(pool, 8, [], banned, rng);
     assert.ok(limited.length === 8 && limited.every((e) => !banned.has(e.id)));
     assert.equal(pick(pool, 3, [], new Set(pool.map((e) => e.id)), rng).length, 0, 'a fully banned pool picks nothing');
@@ -119,19 +118,15 @@ export function runMinigamesTests(): number {
       assert.ok(g.name.length <= 16, g.name);
       per[g.category]++;
     }
-    assert.deepEqual(per, { SURVIVAL: 6, RACE: 8, SCORE: 7, BRAIN: 2 });
-    assert.equal(mgPool().length,23);
+    assert.deepEqual(per, { SURVIVAL: 6, RACE: 8, SCORE: 6, BRAIN: 2 });
+    assert.equal(mgPool().length,22);
   });
 
   t('batch-A scaling (PartyScalingCheck)', () => {
     for (let p = 2; p <= 10; p++) {
       assert.ok(WhackAMole.molesPerPop(p) >= WhackAMole.molesPerPop(p - 1 || 1));
-      assert.ok(CarnivalShootout.targetsPerSpawn(p) >= CarnivalShootout.targetsPerSpawn(Math.max(2, p - 1)));
       assert.ok(TreasureCove.findsPerQuarter(p) >= TreasureCove.findsPerQuarter(Math.max(2, p - 1)));
-      assert.ok(CarnivalShootout.duckEvery(p) <= CarnivalShootout.duckEvery(Math.max(2, p - 1)));
-      assert.ok(CarnivalShootout.targetsPerSpawn(p) >= 2 && WhackAMole.molesPerPop(p) >= 1);
       assert.ok(4 * (TreasureCove.findsPerQuarter(p) + 2) <= HALF * 2 * HALF * 2 * DEPTH / 2);
-      assert.ok(CarnivalShootout.targetsPerSpawn(p) / scale(p, 18, 7) / p > .6 / 20 * 0 || true);
     }
   });
 

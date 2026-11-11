@@ -90,7 +90,7 @@ const LIST: [string, TileStyle][] = [
   ['diorite', { s: 'noise', pal: DIORITE }],
   ['polished_diorite', { s: 'smooth', pal: DIORITE }],
   ['blackstone', { s: 'noise', pal: BLACKSTONE }],
-  ['bedrock', { s: 'noise', pal: [0x1f1f22, 0x2e2e33, 0x404046, 0x55555c, 0x6c6c74], grain: 1.4 }],
+  ['bedrock', { s: 'noise', pal: [0x4a4846, 0x625f5c, 0x7a7773, 0x93908b, 0xb0ada7], grain: 1.4 }],
   ['end_stone', { s: 'noise', pal: [0xc9c48a, 0xd6d297, 0xe0dca4, 0xe9e5b1, 0xf1eebe] }],
   ['bricks', { s: 'bricks', pal: [0x7a3424, 0x8f3f2c, 0xa24b34, 0xb2583e, 0xc06849], mortar: 0xb6aa98, w: 6, h: 4 }],
   ['quartz_side', { s: 'smooth', pal: [0xd8d2c8, 0xe2ddd4, 0xebe7df, 0xf3f0ea, 0xfbf9f5] }],
@@ -229,8 +229,8 @@ const SPRITES: [string, string, number[]][] = [
   ['shears_vanilla', 'shears', IRON.slice(1)],
   ['snowball', 'ball', [0xc6d4e2, 0xdde7f0, 0xf0f5fa, 0xffffff]],
   ['egg', 'egg', [0xc8b89a, 0xdccdb0, 0xece0c8, 0xfaf3e4]],
-  ['ender_pearl', 'ball', [0x0e3a36, 0x165a52, 0x2a8a7a, 0x60c8b0]],
-  ['wind_charge', 'ball', [0x7a9ab8, 0xa0bcd4, 0xc8dceb, 0xeef6fb]],
+  ['ender_pearl', 'pearl', [0x0e3a36, 0x165a52, 0x2a8a7a, 0x60c8b0]],
+  ['wind_charge', 'wind', [0x7a9ab8, 0xa0bcd4, 0xc8dceb, 0xeef6fb]],
   ['trident', 'trident', [0x2a6a6a, 0x3a8a88, 0x5ab0aa, 0x8ad8cf]],
   ['mace', 'mace', [0x4a4e53, 0x6b7076, 0x9ca1a6, 0xc8a050]],
   ['elytra', 'elytra', [0x5a5a7a, 0x74749a, 0x9090b8, 0xb0b0d4]],
@@ -252,7 +252,7 @@ const SPRITES: [string, string, number[]][] = [
   ['potion', 'potion', [0x3a3e44, 0x8a8e94, 0xc8ccd0, 0xffffff]],
   ['splash_potion', 'splash', [0x3a3e44, 0x8a8e94, 0xc8ccd0, 0xffffff]],
   ['lingering_potion', 'lingering', [0x3a3e44, 0x8a8e94, 0xc8ccd0, 0xffffff]],
-  ['spawn_egg', 'egg', [0x3a5a2a, 0x5a8a3a, 0x8ac060, 0xd0f0a0]],
+  ['spawn_egg', 'spawn_egg', [0x3a5a2a, 0x5a8a3a, 0x8ac060, 0xd0f0a0]],
   ['compass', 'compass', [0x3a3e44, 0x8a8e94, 0xc23030, 0xe8ecef]],
   ['clock', 'compass', [0x8a6a20, 0xc89a30, 0x3a3e44, 0xf0f0e0]],
   ['lead', 'string', [0x6a4a20, 0x9a7034, 0xc89a50]],
@@ -342,6 +342,12 @@ LIST.push(
  ['soul_soil',{s:'noise',pal:[0x33281f,0x403128,0x4e3c31,0x5d493c]}],
  ['nylium',{s:'noise',pal:[0x512028,0x6b2931,0x86333b,0xa34048]}],
  ['yellow_glazed',{s:'special',name:'glazed',pal:[0xc79a13,0xecc12a,0xfce05e,0xfff5cf]}]
+);
+// Item tint masks (icons only): potion liquid, spawn egg base and spots.
+LIST.push(
+  ['potion_overlay', { s: 'sprite', shape: 'potion_overlay', pal: [0xffffff] }],
+  ['egg_base_overlay', { s: 'sprite', shape: 'egg_base_overlay', pal: [0xffffff] }],
+  ['egg_spots_overlay', { s: 'sprite', shape: 'egg_spots_overlay', pal: [0xffffff] }],
 );
 export const VT: Record<string, number> = {};
 export const VANILLA_TILE_STYLES: Record<number, TileStyle> = {};

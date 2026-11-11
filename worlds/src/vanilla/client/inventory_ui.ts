@@ -199,7 +199,7 @@ export class InventoryUI {
       const st = this.stackAt(s.index);
       s.el.classList.toggle('empty', !st);
       if (st) {
-        renderItemIcon(s.canvas, this.d.atlas, st.id);
+        renderItemIcon(s.canvas, this.d.atlas, st.id, st);
         s.count.textContent = st.count > 1 ? String(st.count) : '';
         const max = VITEM[st.id]?.durability;
         const left = max ? 1 - (st.dmg ?? 0) / max : 1;
@@ -214,7 +214,7 @@ export class InventoryUI {
       this.cursorEl.hidden = !c;
       const cv = this.cursorEl.querySelector('canvas')!;
       cv.width = cv.height = 32;
-      if (c) renderItemIcon(cv, this.d.atlas, c.id);
+      if (c) renderItemIcon(cv, this.d.atlas, c.id, c);
       this.cursorEl.querySelector('span')!.textContent = c && c.count > 1 ? String(c.count) : '';
     }
     if (this.progress) this.progress.style.width = `${Math.round((this.win?.cook ?? 0) * 100)}%`;

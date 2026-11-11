@@ -11,7 +11,6 @@ import { ARENA_BOX, BASE_Y, arenaSeed, type ArenaDef } from './arena';
 import { PODIUM } from './podium';
 import type { Minigame } from './game';
 import { WhackAMole, WHACK_ARENA } from './whack';
-import { CarnivalShootout, SHOOTOUT_ARENA } from './shootout';
 import { MemoryMosaic, MEMORY_ARENA } from './memory';
 import { BrainRush, BRAIN_ARENA } from './brain';
 import { TreasureCove, TREASURE_ARENA } from './treasure';
@@ -42,7 +41,7 @@ const ARENAS: Record<string, ArenaDef> = {
   spleef: GLACIERSPLEEF_ARENA, disco: DISCODASH_ARENA, anvil: ANVILPANIC_ARENA, tnt_run: TNTRUN_ARENA, bow_spleef: BOWSPLEEF_ARENA, minecarts: MUSICALMINECARTS_ARENA,
   koth:KINGOFTHEHILL_ARENA,sheep:SHEEPHERD_ARENA,
   red_light: REDLIGHT_ARENA,
-  whack: WHACK_ARENA, shootout: SHOOTOUT_ARENA, memory: MEMORY_ARENA,
+  whack: WHACK_ARENA, memory: MEMORY_ARENA,
   brain: BRAIN_ARENA, treasure: TREASURE_ARENA,
 };
 const FACTORIES: Record<string, (course: number) => Minigame> = {
@@ -50,7 +49,7 @@ const FACTORIES: Record<string, (course: number) => Minigame> = {
   koth:()=>new KingOfTheHill(),sheep:()=>new SheepHerd(),rooftop_tag:seed=>new RooftopTag(seed),canopy:seed=>new CoinCanopy(seed),boat_race:seed=>new BoatRush(seed),glide:seed=>new ElytraRally(seed),
   maze: seed => new HedgeMaze(seed), lava_climb: seed => new LavaClimb(seed),
   red_light: () => new RedLight(), crumble: seed => new CrumblingRuins(seed), blink: seed => new NeonBlink(seed), lunar: seed => new LunarLeap(seed),
-  whack: () => new WhackAMole(), shootout: () => new CarnivalShootout(), memory: () => new MemoryMosaic(),
+  whack: () => new WhackAMole(), memory: () => new MemoryMosaic(),
   brain: () => new BrainRush(), treasure: () => new TreasureCove(),
 };
 export function createGame(id: string, course = 0): Minigame | null { return FACTORIES[id]?.(course) ?? null; }

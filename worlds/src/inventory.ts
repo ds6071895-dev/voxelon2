@@ -65,5 +65,7 @@ function sanitizeStack(raw: unknown): ItemStack | null {
   if (info.gun && Number.isFinite(s.loaded)) {
     stack.loaded = Math.min(info.gun.mag, Math.max(0, Math.floor(s.loaded as number)));
   }
+  const potion = (s as { potion?: { color?: unknown } }).potion;
+  if (potion && Number.isFinite(potion.color)) stack.potion = { color: potion.color as number };
   return stack;
 }

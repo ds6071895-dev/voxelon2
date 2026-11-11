@@ -21,6 +21,7 @@ import { EntityView3D } from './entity_view';
 import { VanillaHud } from './vanilla_hud';
 import { InventoryUI } from './inventory_ui';
 import { MenuUI } from './menu_ui';
+import './icon_tints';
 import { segmentHitsBox } from '../entity';
 import type { BlockHit, FxEvent, MAction, MPayload, SelfView } from '../messages';
 import type { VStack } from '../stack';
