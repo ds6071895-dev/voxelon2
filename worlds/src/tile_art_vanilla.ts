@@ -71,6 +71,76 @@ function framed(p: number[], frame: number[]): Paint {
 
 // ── Special blocks ──────────────────────────────────────────────────────────
 
+// ── Crafting table ──────────────────────────────────────────────────────────
+// Pixel stamps over plank texture: '.' keeps the planks underneath.
+type Canvas = Parameters<Paint>[0];
+function stamp(c: Canvas, rows: string[], ink: Record<string, RGBA>): void {
+  rows.forEach((row, y) => { for (let x = 0; x < N; x++) { const k = ink[row[x]]; if (k) c.set(x, y, k); } });
+}
+function craftInk(P: RGBA[]): Record<string, RGBA> {
+  return {
+    D: darker(P[0], .62), d: P[0], m: P[1], M: P[2], H: P[P.length - 1], h: P[P.length - 2],
+    g: darker(P[0], .78), G: mix(P[1], P[0], .5),
+    I: hex(0x8d939a), i: hex(0x5d6268), W: hex(0xc9ced3),
+    S: hex(0xb9bec4), s: hex(0x7a8087), t: hex(0x4f545a),
+    B: hex(0x6a4520), b: hex(0x4a2e14), Y: hex(0xd8b04a), y: hex(0x9c7a26),
+  };
+}
+const CRAFT_TOP = [
+  'DDDDDDDDDDDDDDDD',
+  'DIIhhhhhhhhhhIID',
+  'DIi..........iID',
+  'Dh.HHHHHHHHHHd.D',
+  'Dh.HggHggHggHd.D',
+  'Dh.HgGHgGHgGHd.D',
+  'Dh.HHHHHHHHHHd.D',
+  'Dh.HggHggHggHd.D',
+  'Dh.HgGHgGHgGHd.D',
+  'Dh.HHHHHHHHHHd.D',
+  'Dh.HggHggHggHd.D',
+  'Dh.HgGHgGHgGHd.D',
+  'Dh.dddddddddddsD',
+  'DIi..........iID',
+  'DIIddddddddddIID',
+  'DDDDDDDDDDDDDDDD',
+];
+const CRAFT_FRONT = [
+  'HHHHHHHHHHHHHHHH',
+  'MMMMMMMMMMMMMMMM',
+  'DDDDDDDDDDDDDDDD',
+  'Dh............dD',
+  'Dh...t......t.dD',
+  'Dh..WSSSBb..I.dD',
+  'Dh..SSSSBb.IIIdD',
+  'Dh..SSSsBb.IiIdD',
+  'Dh..SSssBb..B.dD',
+  'Dh..Sss.....B.dD',
+  'Dh..s.s.....B.dD',
+  'Dh..........b.dD',
+  'Dh............dD',
+  'DhmmmmmmmmmmmmdD',
+  'DhdddddddddddddD',
+  'DDDDDDDDDDDDDDDD',
+];
+const CRAFT_SIDE = [
+  'HHHHHHHHHHHHHHHH',
+  'MMMMMMMMMMMMMMMM',
+  'DDDDDDDDDDDDDDDD',
+  'Dh............dD',
+  'Dh..t.....t...dD',
+  'Dh..YYYYYY....dD',
+  'Dh..Yyyyy..IIIdD',
+  'Dh..Yy....IIiIdD',
+  'Dh..Yy.....BB.dD',
+  'Dh..Yy.....Bb.dD',
+  'Dh..Yy.....Bb.dD',
+  'Dh..yy.....Bb.dD',
+  'Dh.........bb.dD',
+  'DhmmmmmmmmmmmmdD',
+  'DhdddddddddddddD',
+  'DDDDDDDDDDDDDDDD',
+];
+
 const SPECIAL: Record<string, (P: RGBA[]) => Paint> = {
   // Party Games arenas.
   pumpkin_face: (P) => (c, seed) => c.fill((x, y) => {
@@ -122,24 +192,9 @@ const SPECIAL: Record<string, (P: RGBA[]) => Paint> = {
     const crack = Math.abs(tnoise(seed, x, y, 4) - .5) < .07;
     return crack ? pick(P.slice(3), rnd(seed, x, y), x, y) : pick(P.slice(0, 3), tfbm(seed, x, y), x, y, .5);
   }),
-  craft_top: (P) => (c, seed) => {
-    planks(P)(c, seed);
-    for (let i = 1; i < 15; i++) { c.set(i, 1, P[0]); c.set(i, 14, P[0]); c.set(1, i, P[0]); c.set(14, i, P[0]); }
-    for (let i = 3; i < 13; i++) { c.set(i, 8, P[1]); c.set(8, i, P[1]); }
-  },
-  craft_side: (P) => (c, seed) => {
-    planks(P)(c, seed);
-    for (let x = 0; x < 16; x++) { c.set(x, 0, P[0]); c.set(x, 1, P[4]); }
-    // Hanging saw and hammer.
-    for (let y = 4; y < 12; y++) c.set(4, y, hex(0x9ca1a6));
-    for (let y = 4; y < 9; y++) c.set(11, y, hex(0x6a4a20));
-    c.set(10, 4, hex(0x5a5e64)); c.set(12, 4, hex(0x5a5e64)); c.set(11, 3, hex(0x5a5e64));
-  },
-  craft_front: (P) => (c, seed) => {
-    planks(P)(c, seed);
-    for (let x = 0; x < 16; x++) { c.set(x, 0, P[0]); c.set(x, 1, P[4]); }
-    for (let y = 5; y < 12; y++) for (let x = 3; x < 13; x += 3) c.set(x, y, P[0]);
-  },
+  craft_top: (P) => (c, seed) => { planks(P)(c, seed); stamp(c, CRAFT_TOP, craftInk(P)); },
+  craft_side: (P) => (c, seed) => { planks(P)(c, seed); stamp(c, CRAFT_SIDE, craftInk(P)); },
+  craft_front: (P) => (c, seed) => { planks(P)(c, seed); stamp(c, CRAFT_FRONT, craftInk(P)); },
   furnace_side: (P) => (c, seed) => c.fill((x, y) => pick(P, .45 + (tnoise(seed, x, y, 4) - .5) * .3 + (y < 2 ? .2 : 0), x, y, .5)),
   furnace_front: (P) => (c, seed) => {
     SPECIAL.furnace_side(P)(c, seed);

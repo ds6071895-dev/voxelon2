@@ -38,7 +38,7 @@ export class InventoryUI {
   private card: HTMLElement | null = null;
   private cursorEl: HTMLElement | null = null;
   private tip: HTMLElement | null = null;
-  private slotEls: { el: HTMLElement; canvas: HTMLCanvasElement; count: HTMLElement; dur: HTMLElement; index: number }[] = [];
+  private slotEls: { el: HTMLElement; canvas: HTMLCanvasElement; count: HTMLElement; index: number }[] = [];
   private inv: InvState = emptyInventory();
   private win: (Win & { id: number; kind: WindowView['kind']; cook?: number; burn?: number }) | null = null;
   private rev = 0;
@@ -156,7 +156,6 @@ export class InventoryUI {
     const canvas = document.createElement('canvas'); canvas.width = canvas.height = 32;
     el.appendChild(canvas);
     const count = uiEl('span', 'v-count', el);
-    const dur = uiEl('i', 'v-dur', el);
     el.addEventListener('mousedown', (e) => {
       e.preventDefault(); e.stopPropagation();
       const button = e.button === 2 ? 1 : 0;
@@ -173,7 +172,7 @@ export class InventoryUI {
     el.addEventListener('contextmenu', (e) => e.preventDefault());
     el.addEventListener('mouseenter', () => { this.hover = index; this.showTip(index); });
     el.addEventListener('mouseleave', () => { if (this.hover === index) this.hover = -1; if (this.tip) this.tip.hidden = true; });
-    this.slotEls.push({ el, canvas, count, dur, index });
+    this.slotEls.push({ el, canvas, count, index });
   }
 
   private stackAt(index: number): VStack | null {
@@ -201,13 +200,8 @@ export class InventoryUI {
       if (st) {
         renderItemIcon(s.canvas, this.d.atlas, st.id, st);
         s.count.textContent = st.count > 1 ? String(st.count) : '';
-        const max = VITEM[st.id]?.durability;
-        const left = max ? 1 - (st.dmg ?? 0) / max : 1;
-        s.dur.hidden = !max || !st.dmg;
-        s.dur.style.width = `${Math.round(left * 100)}%`;
-        s.dur.style.background = `hsl(${Math.round(left * 120)},80%,45%)`;
         s.el.classList.toggle('glint', !!st.ench?.length);
-      } else { clearItemIcon(s.canvas); s.count.textContent = ''; s.dur.hidden = true; s.el.classList.remove('glint'); }
+      } else { clearItemIcon(s.canvas); s.count.textContent = ''; s.el.classList.remove('glint'); }
     }
     if (this.cursorEl) {
       const c = this.inv.cursor;
@@ -235,7 +229,6 @@ export class InventoryUI {
     if (d?.attack) uiEl('span', 'line stat', this.tip, `${d.attack.damage} Attack Damage · ${d.attack.speed} Attack Speed`);
     if (d?.armor && d.armor.points) uiEl('span', 'line stat', this.tip, `+${d.armor.points} Armor${d.armor.toughness ? ` · +${d.armor.toughness} Toughness` : ''}`);
     if (d?.food) uiEl('span', 'line stat', this.tip, `Restores ${d.food.nutrition / 2} hunger`);
-    if (d?.durability) uiEl('span', 'line mute', this.tip, `Durability ${d.durability - (st.dmg ?? 0)} / ${d.durability}`);
   }
 
   requestClose(): void {

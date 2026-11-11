@@ -266,18 +266,9 @@ export class Sim {
     const up = p.onGround ? .4 : .1;
     this.host.impulse(id, dx * strength * 20, up * 20 * (1 - Math.min(1, kb)), dz * strength * 20, by, Math.ceil(p.hp));
   }
-  /** Tool/armour durability. Unbreaking skips with chance level/(level+1). */
-  wear(p: VPlayer, slot: number, amount: number): void {
-    const s = p.inv.slots[slot];
-    const max = s ? VITEM[s.id]?.durability : undefined;
-    if (!s || !max) return;
-    const unb = enchLevel(s, 'unbreaking');
-    let used = 0;
-    for (let i = 0; i < amount; i++) if (unb === 0 || this.rng() < 1 / (unb + 1)) used++;
-    s.dmg = (s.dmg ?? 0) + used;
-    if (s.dmg >= max) { p.inv.slots[slot] = null; const b = this.host.body(p.id); this.sound('item_break', b?.x, b?.y, b?.z); }
-    p.invDirty = true;
-  }
+  /** Durability is off in Worlds: tools, weapons and armour never wear out
+   *  or break. Callers keep reporting use so it could come back in one place. */
+  wear(_p: VPlayer, _slot: number, _amount: number): void {}
 
   // ── Actions ──────────────────────────────────────────────────────────────
 
