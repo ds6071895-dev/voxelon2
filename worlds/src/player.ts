@@ -368,9 +368,11 @@ export class Player {
       this.onGround = false;
       const falling = this.vel.y;
       this.moveAxis(world, 1, this.vel.y * dt);
-      // Slime: land without sneaking and bounce back up at the same speed.
+      // Slime: land without sneaking and bounce back up to about half the drop
+      // (√.5 of the speed). A full-height bounce outran the server's jump ceiling
+      // and got pulled back down; Lucky Pillars' floor adds a server launch on top.
       if (this.onGround && falling < -2 && !this.sneaking && mk?.(this.pos.x, this.pos.y - .05, this.pos.z) === 'slime') {
-        this.vel.y = -falling * .98; this.onGround = false; this.fallDistance = 0;
+        this.vel.y = -falling * .71; this.onGround = false; this.fallDistance = 0;
       }
       const yBeforeSteps = this.pos.y;
       this.moveAxisSneakAware(world, 0, this.vel.x * dt, wasOnGround);

@@ -6,6 +6,9 @@ export const LP = {
   TOP_Y: 100,
   PILLAR_DEPTH: 28,
   BOTTOM_Y: 72,
+  /** Bouncy Floor: share of the fall height a slime bounce gives back, and the inward push (b/s). */
+  SLIME_BOUNCE: .5,
+  SLIME_PUSH: 10,
   CROWN_RISE: 3,
   MAX_BUILD_Y: 124,
   SWEEP_RADIUS: 56,

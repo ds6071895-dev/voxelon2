@@ -53,6 +53,8 @@ export interface SimRules {
   onLethal(id: number, src: DamageSource): void;
   /** A player damaged another (vampires, kill credit bookkeeping). */
   onPlayerHurt?(victim: number, src: DamageSource, dealt: number): void;
+  /** A player touched down after falling `fallDist` blocks (Lucky Pillars' slime floor). */
+  onLand?(id: number, fallDist: number, kind: 'hay' | 'honey' | 'slime' | 'normal'): void;
   /** Extra damage scaling by kind (Disaster City's survival kits). */
   damageScale?(id: number, src: DamageSource): number;
   /** Right-click on a menu item (survival book, ghost tricks...). */
@@ -1379,6 +1381,7 @@ export class Sim {
         const dmg = fallDamage(p.fallDist, attr.safeFall, p.effects.level('jump_boost'), kind);
         if (dmg > 0) this.damage(p.id, { kind: 'fall', amount: dmg, label: 'fall' });
       }
+      this.rules.onLand?.(p.id, p.fallDist, kind);
       p.fallDist = 0;
     }
     p.lastX = b.x; p.lastY = b.y; p.lastZ = b.z;

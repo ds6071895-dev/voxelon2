@@ -16,6 +16,9 @@ export interface Party {
   members: number[];
   /** Party Games host setup for the next match (the leader's). */
   minigames?: MinigamesSetup;
+  /** Whether the leader's last start topped the party up with bots: Play again
+   *  (which sends no choice) reuses it. Unset means no bots. */
+  fill?: boolean;
 }
 
 type PartyJoinError = 'invalid' | 'full' | 'already';

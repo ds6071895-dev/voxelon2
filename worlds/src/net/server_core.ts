@@ -456,7 +456,7 @@ export class GameServer {
       case 'mgPlaylists': return this.savePlaylists(p, msg.playlists);
       case 'play':
         if (isRatClass(msg.ratClass)) p.rsClass = msg.ratClass;
-        return isGameMode(msg.mode) ? this.play(p, msg.mode, typeof msg.seeker === 'number' ? msg.seeker : undefined, msg.fill !== false) : [];
+        return isGameMode(msg.mode) ? this.play(p, msg.mode, typeof msg.seeker === 'number' ? msg.seeker : undefined, typeof msg.fill === 'boolean' ? msg.fill : undefined) : [];
       case 'cancelQueue': {
         if (!p.queue) return [this.to(p, { t: 'queue', mode: null })];
         this.leaveQueue(p);
@@ -598,7 +598,7 @@ export class GameServer {
 
   private partyState(party: Party): PartyState {
     return {
-      code: party.code, leader: party.leader, minigames: party.minigames,
+      code: party.code, leader: party.leader, minigames: party.minigames, fill: party.fill,
       members: party.members.map((id) => {
         const m = this.players.get(id)!;
         return {
@@ -719,7 +719,10 @@ export class GameServer {
         if (m.worldId !== null) out.push(...this.exitMatch(m, true));
         if (m.queue) { this.leaveQueue(m); out.push(this.to(m, { t: 'queue', mode: null })); }
       }
-      out.push(...(isEngineMode(mode) ? this.launchEngine(mode, members, party, fill !== false)
+      // No choice sent (Play again) = the party's last one; a party never gets bots by default.
+      const useFill = fill ?? party.fill ?? false;
+      party.fill = useFill;
+      out.push(...(isEngineMode(mode) ? this.launchEngine(mode, members, party, useFill)
         : mode === 'ratseek' ? this.launchRatSeek(members, seeker ?? 0, p.id) : this.launch(mode, members, true)));
       return out;
     }

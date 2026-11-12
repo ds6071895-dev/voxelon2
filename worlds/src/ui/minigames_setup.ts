@@ -29,7 +29,8 @@ export class MinigamesSetupSheet {
   private party: PartyState | null = null;
   private myId = 0;
   private lists: MgPlaylist[] = [];
-  private fill = true;
+  /** Off by default: a party plays on its own unless the host ticks bots in. */
+  private fill = false;
   /** The playlist being edited (index into lists, or -1 for a new one). */
   private draft: { index: number; name: string; games: string[] } | null = null;
   private error = '';
@@ -51,6 +52,7 @@ export class MinigamesSetupSheet {
 
   show(page: Page = 'setup', readOnly = false): void {
     this.page = page; this.readOnly = readOnly; this.error = '';
+    this.fill = this.party?.fill ?? this.fill;
     if (!this.scrim) {
       this.scrim = uiEl('div', 'w-scrim open mg-setup', this.app);
       this.scrim.addEventListener('mousedown', (e) => { if (e.target === this.scrim) this.close(); });

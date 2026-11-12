@@ -127,6 +127,7 @@ export class PillarsMatch implements ModeEngine {
       instantTntFuse: 50,
       onLethal: (id, src) => this.eliminate(id, src.label ?? src.kind),
       onPlayerHurt: (victim, src, dealt) => this.onHurt(victim, src, dealt),
+      onLand: (id, fallDist, kind) => this.onLand(id, fallDist, kind),
       attributes: (id) => this.attributes(id),
       isTargetable: (id) => this.alive.has(id),
       onMenuItem: (id, stack) => { if (stack.id === VI.ghost_tricks) this.openGhostMenu(id); },
@@ -286,6 +287,7 @@ export class PillarsMatch implements ModeEngine {
   }
 
   private tickLive(): void {
+    this.checkSlimeFloor();
     this.checkVoid();
     if (!this.live()) return;
     const dm = this.phase === 'deathmatch';
@@ -574,6 +576,39 @@ export class PillarsMatch implements ModeEngine {
     if (this.live() && !left) this.host.send(id, { k: 'feed', text: "You're a ghost! Cheer heals half a heart; Boo gives 4s of glowing. One trick every 25s; each survivor is protected for 20s after any trick.", tone: 'ghost' });
   }
 
+  /** Bouncy Floor: the slime floor throws you back up to about half the height
+   *  you fell from (never back onto the pillar tops for free), then pushes you
+   *  back in toward the pillars. Server-driven, so movement validation allows it. */
+  private onLand(id: number, fallDist: number, kind: string): void {
+    if (this.twist !== 'slime_floor' || kind !== 'slime') return;
+    const b = this.host.body(id);
+    if (b && Math.abs(b.y - LP.BOTTOM_Y) <= .3) this.slimeBounce(id, fallDist);
+  }
+  /** The client bounces on the frame it lands, so the server often never sees
+   *  a grounded pose: a fall that reaches floor height counts as the landing. */
+  private checkSlimeFloor(): void {
+    if (this.twist !== 'slime_floor') return;
+    for (const id of this.alive) {
+      const b = this.host.body(id), p = this.sim.players.get(id);
+      if (!b || !p || b.sneaking || p.fallDist < 2 || b.y > LP.BOTTOM_Y + 1.2 || b.y < LP.BOTTOM_Y - .5) continue;
+      if (this.host.getBlock(Math.floor(b.x), LP.BOTTOM_Y - 1, Math.floor(b.z)) !== VB.slime_block) continue;
+      this.slimeBounce(id, p.fallDist);
+      p.fallDist = 0;
+    }
+  }
+  private slimeBounce(id: number, fallDist: number): void {
+    const b = this.host.body(id);
+    if (!b || fallDist < 2 || !this.alive.has(id)) return;
+    const height = Math.min(fallDist * LP.SLIME_BOUNCE, 9);
+    const vy = Math.sqrt(2 * 32 * height);
+    let dx = -b.x, dz = -b.z, len = Math.hypot(dx, dz);
+    if (len < 1) { const a = this.rng() * Math.PI * 2; dx = Math.cos(a); dz = Math.sin(a); len = 1; }
+    const px = dx / len * LP.SLIME_PUSH, pz = dz / len * LP.SLIME_PUSH;
+    this.host.launch(id, px, vy, pz);
+    const bot = this.bots.find((x) => x.id === id);
+    if (bot) { bot.body.vel.set(px, vy, pz); bot.body.onGround = false; }
+    this.sim.sound('wind_burst', b.x, b.y, b.z, 1.6);
+  }
   private onHurt(victim: number, src: DamageSource, dealt: number): void {
     if (this.twist !== 'vampires' || src.kind !== 'melee' || src.by === undefined || src.byEntity || !this.alive.has(src.by)) return;
     this.sim.heal(src.by, dealt * LP.VAMPIRE_LIFESTEAL);

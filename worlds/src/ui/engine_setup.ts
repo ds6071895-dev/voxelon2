@@ -9,7 +9,8 @@ import { PARTY_MAX } from '../net/protocol';
 
 export class EngineSetupSheet {
   private scrim: HTMLElement | null = null;
-  private fill = true;
+  /** Off by default: a party plays on its own unless the host ticks bots in. */
+  private fill = false;
 
   constructor(private readonly app: HTMLElement, private readonly start: (mode: EngineMode, fill: boolean) => void) {}
 
@@ -17,6 +18,7 @@ export class EngineSetupSheet {
 
   show(mode: EngineMode, party: PartyState, myId: number): void {
     this.close();
+    this.fill = party.fill ?? this.fill;
     const scrim = this.scrim = uiEl('div', 'w-scrim open', this.app);
     scrim.addEventListener('mousedown', (e) => { if (e.target === scrim) this.close(); });
     const card = uiEl('div', 'w-dialog', scrim);
