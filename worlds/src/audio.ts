@@ -615,6 +615,36 @@ export class GameAudio {
     if (p > 0.9) this.tone({ type: 'sine', from: 150, to: 62, dur: 0.3, gain: 0.12 });
   }
 
+  /** Vanilla ranged items leaving the hand. A throw is an airy whoosh that
+   *  rises; a pearl adds a glassy shimmer; a crossbow is a hard mechanical
+   *  clack with a twang; a trident is a heavy rush; loading is a ratchet. */
+  rangedCue(kind: 'throw' | 'pearl' | 'crossbow' | 'crossbowLoad' | 'trident', pos?: THREE.Vector3): void {
+    switch (kind) {
+      case 'throw':
+        this.noise({ freq: 500, dur: 0.16, gain: 0.13, slideTo: 1600, type: 'bandpass', q: 0.8, pos });
+        this.tone({ type: 'triangle', from: 220, to: 340, dur: 0.08, gain: 0.04, pos });
+        break;
+      case 'pearl':
+        this.noise({ freq: 600, dur: 0.18, gain: 0.12, slideTo: 1900, type: 'bandpass', q: 0.8, pos });
+        this.tone({ type: 'sine', from: 1300, to: 1900, dur: 0.22, gain: 0.05, vibrato: 18, pos });
+        break;
+      case 'crossbow':
+        this.noise({ freq: 2600, dur: 0.05, gain: 0.22, slideTo: 700, type: 'bandpass', q: 1.6, pos });
+        this.tone({ type: 'square', from: 260, to: 110, dur: 0.06, gain: 0.05, pos });
+        this.tone({ type: 'triangle', from: 640, to: 210, dur: 0.18, gain: 0.12, pos, delay: 0.01 });
+        this.tone({ type: 'sine', from: 140, to: 60, dur: 0.24, gain: 0.1, pos });
+        break;
+      case 'crossbowLoad':
+        for (let i = 0; i < 3; i++) this.noise({ freq: 1800 + i * 300, dur: 0.035, gain: 0.1, type: 'bandpass', q: 3, pos, delay: i * 0.05 });
+        this.tone({ type: 'triangle', from: 380, to: 520, dur: 0.12, gain: 0.05, pos, delay: 0.12 });
+        break;
+      case 'trident':
+        this.noise({ freq: 300, dur: 0.3, gain: 0.18, slideTo: 1100, type: 'bandpass', q: 0.7, pos });
+        this.tone({ type: 'sine', from: 170, to: 80, dur: 0.3, gain: 0.1, pos });
+        break;
+    }
+  }
+
   /** An arrow arriving: a hard tock, brighter when it was a full-draw hit. */
   arrowHit(crit: boolean, pos?: THREE.Vector3): void {
     this.noise({ freq: 1100, dur: 0.06, gain: 0.2, slideTo: 200, type: 'bandpass', q: 1.1, pos });

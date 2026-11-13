@@ -26,7 +26,14 @@ export type TileStyle =
   | { s: 'gem'; pal: number[] }
   | { s: 'framed'; pal: number[]; frame: number[] }
   | { s: 'special'; name: string; pal: number[] }
-  | { s: 'sprite'; shape: string; pal: number[] };
+  | { s: 'sprite'; shape: string; pal: number[] }
+  // Material styles (tile_materials.ts): lit height maps, not flat noise.
+  | { s: 'rock'; pal: number[]; cells?: number; crack?: number; relief?: number; facet?: number; fleck?: number[]; fleckRate?: number }
+  | { s: 'soil'; pal: number[]; clump?: number; pebbles?: number; crumbs?: number; ripple?: number; accent?: number[]; accentRate?: number }
+  | { s: 'clay'; pal: number[] }
+  | { s: 'concrete'; pal: number[] }
+  | { s: 'obsidian'; pal: number[]; glint: number[] }
+  | { s: 'ribbed'; pal: number[]; mark: number };
 
 // ── Shared palettes ─────────────────────────────────────────────────────────
 
@@ -85,25 +92,25 @@ const LIST: [string, TileStyle][] = [
   ['stone_bricks', { s: 'bricks', pal: STONE, mortar: 0x55585e, w: 8, h: 4 }],
   ['chiseled_stone_bricks', { s: 'special', name: 'chiseled', pal: STONE }],
   ['mossy_cobblestone', { s: 'special', name: 'mossy_cobble', pal: STONE }],
-  ['andesite', { s: 'noise', pal: ANDESITE }],
+  ['andesite', { s: 'rock', pal: ANDESITE, cells: 6, crack: .25, facet: .3, fleck: [0x5f615f, 0xb5b7b3], fleckRate: .04 }],
   ['polished_andesite', { s: 'smooth', pal: ANDESITE }],
-  ['diorite', { s: 'noise', pal: DIORITE }],
+  ['diorite', { s: 'rock', pal: DIORITE, cells: 5, crack: .15, facet: .25, fleck: [0x55575a, 0x7a7c7f, 0x8f9194], fleckRate: .09 }],
   ['polished_diorite', { s: 'smooth', pal: DIORITE }],
-  ['blackstone', { s: 'noise', pal: BLACKSTONE }],
-  ['bedrock', { s: 'noise', pal: [0x4a4846, 0x625f5c, 0x7a7773, 0x93908b, 0xb0ada7], grain: 1.4 }],
-  ['end_stone', { s: 'noise', pal: [0xc9c48a, 0xd6d297, 0xe0dca4, 0xe9e5b1, 0xf1eebe] }],
+  ['blackstone', { s: 'rock', pal: BLACKSTONE, cells: 4, crack: .5, facet: .35, relief: 1.1 }],
+  ['bedrock', { s: 'rock', pal: [0x4a4846, 0x625f5c, 0x7a7773, 0x93908b, 0xb0ada7], cells: 4, crack: .7, facet: .7, relief: 1.2 }],
+  ['end_stone', { s: 'rock', pal: [0xc2bc80, 0xd0cb8f, 0xdcd79c, 0xe6e2aa, 0xf0edba], cells: 6, crack: .2, facet: .2, fleck: [0xa9a26c, 0xb3ad76], fleckRate: .08 }],
   ['bricks', { s: 'bricks', pal: [0x7a3424, 0x8f3f2c, 0xa24b34, 0xb2583e, 0xc06849], mortar: 0xb6aa98, w: 6, h: 4 }],
   ['quartz_side', { s: 'smooth', pal: [0xd8d2c8, 0xe2ddd4, 0xebe7df, 0xf3f0ea, 0xfbf9f5] }],
   ['quartz_top', { s: 'framed', pal: [0xd8d2c8, 0xe2ddd4, 0xebe7df, 0xf3f0ea, 0xfbf9f5], frame: [0xc6bfb3] }],
   ['coarse_dirt', { s: 'special', name: 'coarse_dirt', pal: [0x4f3421, 0x5d3e27, 0x6b4a2f, 0x795536, 0x86613f] }],
   ['gravel', { s: 'special', name: 'gravel', pal: [0x6a6462, 0x7b7471, 0x8b8481, 0x9b9491, 0xaba5a2] }],
-  ['red_sand', { s: 'noise', pal: [0x9c4b1c, 0xae5822, 0xbe652a, 0xcc7334, 0xd8823f] }],
+  ['red_sand', { s: 'soil', pal: [0x9c4b1c, 0xae5822, 0xbe652a, 0xcc7334, 0xd8823f], clump: .35, pebbles: .045, crumbs: .04, ripple: .09, accent: [0x7e3a14, 0xe6a060], accentRate: .03 }],
   ['magma', { s: 'special', name: 'magma', pal: [0x3a1208, 0x6b1f0a, 0xa8360c, 0xe0621a, 0xffa23a] }],
   // Metal and gem blocks
   ['iron_block', { s: 'metal', pal: IRON }],
   ['gold_block', { s: 'metal', pal: GOLD }],
-  ['diamond_block', { s: 'metal', pal: DIAMOND }],
-  ['emerald_block', { s: 'metal', pal: EMERALD }],
+  ['diamond_block', { s: 'gem', pal: DIAMOND }],
+  ['emerald_block', { s: 'gem', pal: EMERALD }],
   ['iron_ore', { s: 'ore', pal: STONE, ore: [0xa8836a, 0xc49c80, 0xdcb598] }],
   ['coal_ore', { s: 'ore', pal: STONE, ore: [0x1a1a1c, 0x2a2a2e, 0x3a3a40] }],
   ['gold_ore', { s: 'ore', pal: STONE, ore: [0xc28a24, 0xe0a932, 0xffe08a] }],
@@ -143,8 +150,8 @@ const LIST: [string, TileStyle][] = [
   ['honey', { s: 'special', name: 'honey', pal: [0xc7801a, 0xdb9524, 0xeaa830, 0xf5bd48] }],
   ['hay_side', { s: 'special', name: 'hay_side', pal: [0x9c7f1c, 0xb59526, 0xcbab33, 0xdcbf45, 0xead25c] }],
   ['hay_top', { s: 'special', name: 'hay_top', pal: [0x9c7f1c, 0xb59526, 0xcbab33, 0xdcbf45] }],
-  ['powder_snow', { s: 'noise', pal: [0xd6e2ee, 0xe2ebf4, 0xedf3f9, 0xf6f9fc, 0xffffff] }],
-  ['snow_block', { s: 'noise', pal: [0xd3dfec, 0xe0e9f3, 0xebf1f8, 0xf4f8fc, 0xffffff] }],
+  ['powder_snow', { s: 'soil', pal: [0xd6e2ee, 0xe2ebf4, 0xedf3f9, 0xf6f9fc, 0xffffff], clump: .3, pebbles: .03, crumbs: .02, accent: [0xffffff], accentRate: .03 }],
+  ['snow_block', { s: 'soil', pal: [0xcfdcea, 0xdde7f2, 0xe9f0f8, 0xf3f7fc, 0xffffff], clump: .45, pebbles: .035, crumbs: .03, accent: [0xffffff, 0xc4d6ee], accentRate: .025 }],
   ['ice', { s: 'glass', frame: 0x9cc4f0, tint: 0x8ab8ec, alpha: 190 }],
   ['packed_ice', { s: 'special', name: 'packed_ice', pal: [0x7ea7dc, 0x8fb5e4, 0xa0c3ec, 0xb2d0f2, 0xc5ddf7] }],
   ['blue_ice', { s: 'special', name: 'packed_ice', pal: [0x4f7fd0, 0x6090da, 0x72a1e3, 0x86b2ea, 0x9bc3f0] }],
@@ -166,22 +173,22 @@ const LIST: [string, TileStyle][] = [
   ['cake_top', { s: 'special', name: 'cake_top', pal: [0xe8e2d8, 0xf4efe6, 0xffffff, 0xc23030] }],
   ['cake_side', { s: 'special', name: 'cake_side', pal: [0x8a5a30, 0xa86e3c, 0xf4efe6, 0xffffff] }],
   ['target_side', { s: 'special', name: 'target', pal: [0xc23030, 0xe8e2d8, 0xd8c890] }],
-  ['grass_path', { s: 'noise', pal: [0x7a6a3a, 0x8a7944, 0x9a874e, 0xa99558] }],
-  ['soul_sand', { s: 'noise', pal: [0x3a2a1e, 0x4a3626, 0x5a422e, 0x6a4e36] }],
-  ['netherrack', { s: 'noise', pal: [0x5a1a1a, 0x6e2222, 0x822b2b, 0x963535, 0xa84040] }],
+  ['grass_path', { s: 'soil', pal: [0x6e5e32, 0x7e6c3c, 0x8e7b46, 0x9e8a51, 0xae995c], clump: .4, pebbles: .05, crumbs: .06, accent: [0x6a8a3a, 0x5a7a30], accentRate: .02 }],
+  ['soul_sand', { s: 'soil', pal: [0x2e2118, 0x3a2a1e, 0x4a3626, 0x5a422e, 0x6a4e36], clump: .6, pebbles: .04, crumbs: .1, accent: [0x1e140e], accentRate: .03 }],
+  ['netherrack', { s: 'rock', pal: [0x5a1a1a, 0x6e2222, 0x822b2b, 0x963535, 0xa84040], cells: 6, crack: .55, facet: .45, relief: 1.1 }],
   ['nether_bricks', { s: 'bricks', pal: [0x2a1214, 0x34171a, 0x3f1c20, 0x4a2226], mortar: 0x180a0c, w: 8, h: 4 }],
   ['glowstone', { s: 'special', name: 'glowstone', pal: [0x9a6a20, 0xd09a30, 0xf0c050, 0xffe090] }],
-  ['obsidian', { s: 'noise', pal: [0x0f0a18, 0x170f24, 0x201530, 0x2a1c3e, 0x36264e] }],
-  ['crying_obsidian', { s: 'noise', pal: [0x0f0a18, 0x2a1050, 0x4a1a8a, 0x7a30c8, 0xa860f0] }],
+  ['obsidian', { s: 'obsidian', pal: [0x0f0a18, 0x170f24, 0x201530, 0x2a1c3e, 0x36264e], glint: [0x4a3470, 0x5e4490] }],
+  ['crying_obsidian', { s: 'obsidian', pal: [0x0f0a18, 0x170f24, 0x201530, 0x2a1c3e, 0x36264e], glint: [0x7a30c8, 0xa860f0, 0xd090ff, 0x9a40e0] }],
   ['spawner', { s: 'special', name: 'iron_bars', pal: [0x1d2a33, 0x2b3c47, 0x3d5361] }],
 ];
 for (const [key, , pal] of DYES) {
   LIST.push([`${key}_wool`, { s: 'wool', pal }]);
-  LIST.push([`${key}_concrete`, { s: 'smooth', pal: pal.map((c) => c) }]);
-  LIST.push([`${key}_terracotta`, { s: 'noise', pal: dusty(pal), grain: .5 }]);
+  LIST.push([`${key}_concrete`, { s: 'concrete', pal }]);
+  LIST.push([`${key}_terracotta`, { s: 'clay', pal: dusty(pal) }]);
   LIST.push([`${key}_stained_glass`, { s: 'glass', frame: pal[1], tint: pal[3], alpha: 150 }]);
 }
-LIST.push(['terracotta_plain', { s: 'noise', pal: [0x8a5240, 0x985c48, 0xa56650, 0xb07058], grain: .5 }]);
+LIST.push(['terracotta_plain', { s: 'clay', pal: [0x8a5240, 0x985c48, 0xa56650, 0xb07058] }]);
 
 // ── Item sprites ────────────────────────────────────────────────────────────
 // Shapes are drawn from templates in tile_art_vanilla.ts, recoloured by `pal`.
@@ -281,10 +288,10 @@ const STRIP_OAK = [0x9c7445, 0xae8551, 0xc0965e, 0xcfa56b, 0xdcb378];
 const STRIP_DARK = [0x4f371f, 0x5c4126, 0x684b2d, 0x755535, 0x82603d];
 LIST.push(
   ['quartz_bricks', { s: 'bricks', pal: QUARTZ, mortar: 0xc6bfb3, w: 8, h: 4 }],
-  ['quartz_pillar_side', { s: 'banded', pal: QUARTZ, mark: 0xc6bfb3 }],
+  ['quartz_pillar_side', { s: 'ribbed', pal: QUARTZ, mark: 0xc6bfb3 }],
   ['quartz_pillar_top', { s: 'framed', pal: QUARTZ, frame: [0xbdb5a8] }],
   ['chiseled_quartz', { s: 'special', name: 'chiseled', pal: QUARTZ }],
-  ['deepslate', { s: 'noise', pal: DEEPSLATE }],
+  ['deepslate', { s: 'rock', pal: DEEPSLATE, cells: 6, crack: .35, facet: .3 }],
   ['polished_deepslate', { s: 'smooth', pal: DEEPSLATE }],
   ['polished_blackstone_bricks', { s: 'bricks', pal: [0x26222a, 0x302b34, 0x3a343f, 0x453e4a, 0x504856], mortar: 0x16131a, w: 8, h: 4 }],
   ['red_nether_bricks', { s: 'bricks', pal: [0x4a0c0e, 0x5c1114, 0x6e171a, 0x801e21, 0x922528], mortar: 0x2c0608, w: 8, h: 4 }],
@@ -295,13 +302,13 @@ LIST.push(
   ['stripped_oak_top', { s: 'logtop', bark: STRIP_OAK.slice(0, 3), wood: OAK.slice(2) }],
   ['stripped_dark_oak_log', { s: 'smooth', pal: STRIP_DARK }],
   ['stripped_dark_oak_top', { s: 'logtop', bark: STRIP_DARK.slice(0, 3), wood: DARK_OAK.slice(2) }],
-  ['mud', { s: 'noise', pal: [0x2e2a28, 0x37322f, 0x403a36, 0x49433e, 0x524c46], grain: .7 }],
-  ['moss_block', { s: 'noise', pal: [0x3f5a22, 0x4c6c28, 0x5a7e2f, 0x688f37, 0x78a041] }],
-  ['shroomlight', { s: 'noise', pal: [0xc8601e, 0xe07a28, 0xf09238, 0xf8aa50, 0xffc46c], grain: .8 }],
+  ['mud', { s: 'soil', pal: [0x2e2a28, 0x37322f, 0x403a36, 0x49433e, 0x524c46], clump: .6, pebbles: .03, crumbs: .03, accent: [0x6a625a], accentRate: .02 }],
+  ['moss_block', { s: 'soil', pal: [0x3f5a22, 0x4c6c28, 0x5a7e2f, 0x688f37, 0x78a041], clump: .6, pebbles: .1, crumbs: .06, accent: [0x8ab04c, 0x34501c], accentRate: .03 }],
+  ['shroomlight', { s: 'soil', pal: [0xc8601e, 0xe07a28, 0xf09238, 0xf8aa50, 0xffc46c], clump: .7, pebbles: .08, crumbs: .03, accent: [0xffe7a0, 0xfff4c8], accentRate: .05 }],
   ['suspicious_sand', { s: 'special', name: 'gravel', pal: [0xc2ae7c, 0xcfbb88, 0xdac795, 0xe4d3a2, 0xeedeb0] }],
   ['tinted_glass', { s: 'glass', frame: 0x2a2530, tint: 0x3a3442, alpha: 210 }],
   ['waxed_copper', { s: 'metal', pal: [0x9a4a2c, 0xb45a36, 0xc86c42, 0xd88052, 0xe69666] }],
-  ['pumpkin_side', { s: 'banded', pal: [0xb8561a, 0xd0681f, 0xe37b28, 0xf08f38, 0xf8a650], mark: 0x9c4614 }],
+  ['pumpkin_side', { s: 'ribbed', pal: [0xb8561a, 0xd0681f, 0xe37b28, 0xf08f38, 0xf8a650], mark: 0x9c4614 }],
   ['pumpkin_top', { s: 'framed', pal: [0xb8561a, 0xd0681f, 0xe37b28, 0xf08f38], frame: [0x5a7a28] }],
   ['carved_pumpkin', { s: 'special', name: 'pumpkin_face', pal: [0xb8561a, 0xd0681f, 0xe37b28, 0xf08f38, 0xf8a650] }],
   ['smithing_side', { s: 'special', name: 'craft_side', pal: [0x2a2c33, 0x34363e, 0x3f4149, 0x4a4c55, 0x565862, 0x62646e] }],
@@ -328,19 +335,19 @@ LIST.push(
 // Party Games course palettes (append only).
 LIST.push(
  ['sandstone_cut',{s:'tiles',pal:[0xbda477,0xcdb78b,0xddc99e,0xecdcb4],mortar:0xa78c61,size:8}],
- ['granite',{s:'noise',pal:[0x76564e,0x8c685c,0xa07869,0xb68c7b,0xcaa28c]}],
+ ['granite',{s:'rock',pal:[0x76564e,0x8c685c,0xa07869,0xb68c7b,0xcaa28c],cells:6,crack:.2,facet:.35,fleck:[0x4e3a36,0xe0bcaa,0x5a4440],fleckRate:.08}],
  ['jungle_planks',{s:'planks',pal:[0x8a5a34,0x9c6a3e,0xae7948,0xbd8752,0xcb945c]}],
  ['mud_bricks',{s:'bricks',pal:[0x6b5144,0x7b5f50,0x8b6e5d,0x9c7e6c],mortar:0x44382f,w:8,h:4}],
- ['packed_mud',{s:'noise',pal:[0x6e5444,0x82634e,0x967359,0xaa8566]}],
- ['mushroom_stem',{s:'banded',pal:[0xb8aa90,0xcebea3,0xe0d1b7,0xf0e4cf],mark:0x968971}],
+ ['packed_mud',{s:'soil',pal:[0x6e5444,0x82634e,0x967359,0xaa8566],clump:.4,pebbles:.03,crumbs:.03,accent:[0xc4a070,0x5a4232],accentRate:.04}],
+ ['mushroom_stem',{s:'ribbed',pal:[0xb8aa90,0xcebea3,0xe0d1b7,0xf0e4cf],mark:0x968971}],
  ['red_mushroom',{s:'special',name:'mushroom',pal:[0x9c2727,0xb53530,0xcf4840,0xe65c4e,0xf6ecda]}],
- ['mycelium',{s:'noise',pal:[0x675d6b,0x7b6e7d,0x8f7f8f,0xa392a3]}],
- ['podzol',{s:'noise',pal:[0x483b20,0x5b4829,0x705632,0x85653c]}],
+ ['mycelium',{s:'soil',pal:[0x675d6b,0x7b6e7d,0x8f7f8f,0xa392a3],clump:.5,pebbles:.08,crumbs:.05,accent:[0xc0b0c4,0x4e4452],accentRate:.04}],
+ ['podzol',{s:'soil',pal:[0x483b20,0x5b4829,0x705632,0x85653c],clump:.55,pebbles:.07,crumbs:.08,accent:[0x9a7a40,0x2e2412],accentRate:.05}],
  ['red_sandstone',{s:'bricks',pal:[0xa24f23,0xba602b,0xcf7538,0xe08b48],mortar:0x87451f,w:16,h:8}],
  ['purpur',{s:'tiles',pal:[0x805c89,0x966d9c,0xab82b0,0xbe97c2],mortar:0x6c4c74,size:8}],
- ['cactus',{s:'banded',pal:[0x285b28,0x347034,0x40863e,0x529e4a],mark:0x153b18}],
- ['soul_soil',{s:'noise',pal:[0x33281f,0x403128,0x4e3c31,0x5d493c]}],
- ['nylium',{s:'noise',pal:[0x512028,0x6b2931,0x86333b,0xa34048]}],
+ ['cactus',{s:'ribbed',pal:[0x285b28,0x347034,0x40863e,0x529e4a],mark:0x153b18}],
+ ['soul_soil',{s:'soil',pal:[0x33281f,0x403128,0x4e3c31,0x5d493c],clump:.5,pebbles:.05,crumbs:.06}],
+ ['nylium',{s:'soil',pal:[0x512028,0x6b2931,0x86333b,0xa34048],clump:.6,pebbles:.1,crumbs:.05,accent:[0xc05058,0x3a141a],accentRate:.04}],
  ['yellow_glazed',{s:'special',name:'glazed',pal:[0xc79a13,0xecc12a,0xfce05e,0xfff5cf]}]
 );
 // Item tint masks (icons only): potion liquid, spawn egg base and spots.

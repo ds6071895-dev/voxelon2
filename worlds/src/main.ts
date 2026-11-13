@@ -259,6 +259,7 @@ const vClient = new VanillaClient({
   clearCrack: () => interaction.clear(),
   swing: () => held.swing(),
   setBowDraw: (f) => held.setBowDraw(f),
+  held,
   sound: (name, at, pitch) => vanillaSound(name, at, pitch),
   burst: (kind, x, y, z, color, n) => vanillaBurst(kind, x, y, z, color, n),
   hurtFlash: (id) => remotePlayers.hurtFlash(id, 0.55),
@@ -275,7 +276,13 @@ function vanillaSound(name: string, at?: THREE.Vector3, pitch?: number): void {
     case 'pickup': audio.pickup(); break;
     case 'place': audio.place('stone', at); break;
     case 'explode': case 'firework_blast': if (at) audio.fireballImpact(at, at.distanceTo(player.pos) < 12); break;
-    case 'bow': case 'crossbow_shoot': audio.bowRelease(1); break;
+    case 'bow': audio.bowRelease(pitch ?? 1); break;
+    case 'crossbow_shoot': audio.rangedCue('crossbow', at); break;
+    case 'crossbow_load': audio.rangedCue('crossbowLoad', at); break;
+    case 'throw': audio.rangedCue('throw', at); break;
+    case 'pearl_throw': audio.rangedCue('pearl', at); break;
+    case 'trident': audio.rangedCue('trident', at); break;
+    case 'arrow_hit': audio.arrowHit(false, at); break;
     case 'hat': case 'pling': audio.bridgeCount(Math.max(1, Math.round(((pitch ?? 1) - .4) * 3))); break;
     case 'go': case 'levelup': case 'growl': audio.bridgeGo(); break;
     case 'toast': audio.duelCue('victory'); break;
@@ -1721,8 +1728,9 @@ function updatePartyWeapon(heldId: number, lookDir: THREE.Vector3, eye: THREE.Ve
   net.sendPgShoot(lookDir.x, lookDir.y, lookDir.z, 1);
 }
 function updatePartyFrame(dt: number): void {
-  if (!pgWeaponsActive() || screens.state !== 'playing' ||
-      (inventory.selectedStack?.id !== Item.BridgeBow && inventory.selectedStack?.id !== Item.IronAxe)) held.setBowDraw(0);
+  // Vanilla modes drive their own bow/trident draw (VanillaClient.input).
+  if (match?.kind !== 'mg' && (!pgWeaponsActive() || screens.state !== 'playing' ||
+      (inventory.selectedStack?.id !== Item.BridgeBow && inventory.selectedStack?.id !== Item.IronAxe))) held.setBowDraw(0);
   if (match?.kind !== 'pg' || !pgSnapshot) {
     partyVisuals.updateArrows(dt);
     axeIndicatorEl.style.display = 'none';
@@ -2148,6 +2156,9 @@ function frame(): void {
   held.setActive(firstPersonActive);
   held.setPaws(rsClient.selfIsRat());
   held.setItem(!duelSpectating ? inventory.selectedStack?.id ?? null : null);
+  const offStack = !duelSpectating && match.kind === 'mg' && vClient.active && !vClient.spectating ? vClient.offhandStack() : null;
+  held.setOffItem(offStack?.id ?? null);
+  held.setOffRaised(!!offStack && vClient.usingOffhand);
   const reloadProgress = reloadTimer > 0 && reloadDuration > 0 ? 1 - reloadTimer / reloadDuration : -1;
   held.update(dt, controlling && interaction.breakingActive, sky.sunIntensity, aimZoom > 1, reloadProgress,
     healUse.active ? healUse.progress : -1, Math.hypot(player.vel.x, player.vel.z), player.onGround);
@@ -2161,6 +2172,7 @@ function frame(): void {
   const showHud = controlling || (screens.state === 'playing' && !duelSpectating);
   crosshair.style.display = controlling ? '' : 'none';
   hotbarEl.style.display = showHud ? 'flex' : 'none';
+  hud.setOffhand(showHud ? offStack : null);
   statusEl.style.display = showHud && match.kind !== 'rs' ? '' : 'none';
   combat.setVisible(controlling);
   const gunStack = controlling ? inventory.selectedStack : null;

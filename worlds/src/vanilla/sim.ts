@@ -29,6 +29,7 @@ import { BOAT, NO_CONTROLS, stepBoat, waterSurface } from './boat';
 import { tickMob, type MobCtx, type Target } from './mobs';
 import { Fluids } from './fluids';
 import { explosionCells } from './explosion';
+import { BOW, CROSSBOW, THROWN, TRIDENT, aimDir, launchPoint } from './ranged';
 import { DEFAULT_MOVE, ENT_FLAG, type FxEvent, type MAction, type MoveProfile, type SelfView } from './messages';
 
 export interface SimRules {
@@ -282,7 +283,7 @@ export class Sim {
     switch (a.k) {
       case 'attack': if (typeof a.target === 'number') this.attackPlayer(p, a.target); else if (typeof a.ent === 'number') this.attackEntity(p, a.ent); break;
       case 'use': this.use(p, a); break;
-      case 'useEnd': this.useEnd(p); break;
+      case 'useEnd': this.useEnd(p, a); break;
       case 'dig': this.dig(p, a.x | 0, a.y | 0, a.z | 0); break;
       case 'digStop': p.dig = null; break;
       case 'glide': this.glide(p, a.on === true); break;
@@ -451,7 +452,9 @@ export class Sim {
     const useOf = (st: VStack | null) => st ? (VITEM[st.id]?.use ?? (VITEM[st.id]?.food ? 'food' : VITEM[st.id]?.armor ? 'armor' : VITEM[st.id]?.block !== undefined || BLOCKS[st.id] ? 'place' : null)) : null;
     if (!useOf(s) || (useOf(s) === 'place' && !a.block)) {
       const off = p.inv.slots[OFFHAND];
-      if (useOf(off) && useOf(off) !== 'place') { s = off; offhand = true; }
+      // The offhand acts when the main hand has nothing to do: shields, food,
+      // bows… and blocks onto a clicked face (unless the main hand holds blocks).
+      if (useOf(off) && (useOf(off) !== 'place' || (a.block && useOf(s) !== 'place'))) { s = off; offhand = true; }
     }
     if (!s) return;
     if (this.rules.blockedUse?.(s.id, s, p.id)) return;
@@ -494,9 +497,9 @@ export class Sim {
           const multi = enchLevel(s, 'multishot') > 0;
           for (const off of multi ? [0, -10, 10] : [0]) {
             const yaw = a.yaw + off * Math.PI / 180;
-            const dir = { x: -Math.sin(yaw) * Math.cos(a.pitch), y: Math.sin(a.pitch), z: -Math.cos(yaw) * Math.cos(a.pitch) };
-            if (firework) this.spawnProjectile('firework', p.id, eye, dir, 1.6, { damage: 7 });
-            else this.spawnProjectile('arrow', p.id, eye, dir, 3.15, { crit: true, pickup: off === 0, power: enchLevel(s, 'power') });
+            const dir = aimDir(yaw, a.pitch, firework ? 0 : CROSSBOW.lift);
+            if (firework) this.spawnProjectile('firework', p.id, eye, dir, CROSSBOW.rocketSpeed, { damage: 7 });
+            else this.spawnProjectile('arrow', p.id, eye, dir, CROSSBOW.speed, { crit: true, pickup: off === 0, power: enchLevel(s, 'power') });
           }
           s.charged = undefined; p.invDirty = true;
           this.wear(p, sl, multi ? 3 : 1);
@@ -506,17 +509,18 @@ export class Sim {
       }
       case 'throw': {
         const v = VITEM[s.id]!.variant as EntityKind;
-        const speed = v === 'ender_pearl' ? 1.5 : v === 'wind_charge' ? 1.5 : 1.5;
-        this.spawnProjectile(v, p.id, eye, look, speed);
+        const t = THROWN[VITEM[s.id]!.key] ?? { kind: v, speed: 1.5, lift: 0, cooldown: 0 };
+        this.spawnProjectile(t.kind, p.id, eye, aimDir(a.yaw, a.pitch, t.lift), t.speed);
         consume();
-        if (v === 'ender_pearl') p.cooldowns.set(s.id, this.tickNo + 20);
-        if (v === 'wind_charge') p.cooldowns.set(s.id, this.tickNo + 10);
+        if (t.cooldown) p.cooldowns.set(s.id, this.tickNo + t.cooldown);
         this.sound(v === 'ender_pearl' ? 'pearl_throw' : 'throw', b.x, b.y, b.z);
         return;
       }
       case 'splash': case 'lingering': {
-        this.spawnProjectile('potion', p.id, eye, { x: look.x, y: look.y + .1, z: look.z }, .5, { potion: s.potion, lingering: use === 'lingering' });
+        const t = THROWN[VITEM[s.id]!.key] ?? THROWN.splash_potion;
+        this.spawnProjectile('potion', p.id, eye, aimDir(a.yaw, a.pitch, t.lift), t.speed, { potion: s.potion, lingering: use === 'lingering' });
         consume();
+        p.cooldowns.set(s.id, this.tickNo + t.cooldown);
         this.sound('throw', b.x, b.y, b.z);
         return;
       }
@@ -687,15 +691,16 @@ export class Sim {
     return false;
   }
 
-  private useEnd(p: VPlayer): void {
+  private useEnd(p: VPlayer, aim?: { yaw?: unknown; pitch?: unknown }): void {
     const u = p.using, b = this.host.body(p.id);
     p.using = null;
     if (!u || !b) return;
     const s = p.inv.slots[u.slot];
     if (!s) return;
     const held = this.tickNo - u.since;
-    const yaw = b.yaw, pitch = b.pitch;
-    const look = { x: -Math.sin(yaw) * Math.cos(pitch), y: Math.sin(pitch), z: -Math.cos(yaw) * Math.cos(pitch) };
+    // Aim from the release itself: the body's look can be a move packet old.
+    const okAngle = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+    const yaw = okAngle(aim?.yaw) ? aim.yaw : b.yaw, pitch = okAngle(aim?.pitch) ? Math.max(-1.6, Math.min(1.6, aim.pitch)) : b.pitch;
     const eye = { x: b.x, y: b.y + 1.62 * this.attr(p.id).scale, z: b.z };
     if (u.kind === 'bow') {
       const power = bowPower(held);
@@ -704,7 +709,7 @@ export class Sim {
       const ammo = this.findAmmo(p, false);
       if (!ammo && !inf) return;
       const kind: EntityKind = ammo?.id === VI.spectral_arrow ? 'spectral_arrow' : 'arrow';
-      this.spawnProjectile(kind, p.id, eye, look, power * 3, {
+      this.spawnProjectile(kind, p.id, eye, aimDir(yaw, pitch, BOW.lift), power * BOW.speed, {
         crit: power >= 1, power: enchLevel(s, 'power'), punch: enchLevel(s, 'punch'), flame: enchLevel(s, 'flame') > 0, pickup: !(inf && kind === 'arrow'),
       });
       if (ammo && !(inf && kind === 'arrow')) { ammo.stack.count--; if (ammo.stack.count <= 0) p.inv.slots[ammo.slot] = null; }
@@ -712,13 +717,13 @@ export class Sim {
       p.invDirty = true;
       this.sound('bow', b.x, b.y, b.z);
     } else if (u.kind === 'trident') {
-      if (held < 10) return;
-      const e = this.spawnProjectile('trident', p.id, eye, look, 2.5, { damage: 8, loyalty: enchLevel(s, 'loyalty'), stack: cloneStack(s), slot: u.slot });
+      if (held < TRIDENT.minTicks) return;
+      const e = this.spawnProjectile('trident', p.id, eye, aimDir(yaw, pitch, TRIDENT.lift), TRIDENT.speed, { damage: 8, loyalty: enchLevel(s, 'loyalty'), stack: cloneStack(s), slot: u.slot });
       void e;
       p.inv.slots[u.slot] = null; p.invDirty = true;
       this.sound('trident', b.x, b.y, b.z);
     } else if (u.kind === 'crossbow') {
-      const need = 25 - 5 * enchLevel(s, 'quick_charge');
+      const need = CROSSBOW.charge(enchLevel(s, 'quick_charge'));
       if (held < need) return;
       const ammo = this.findAmmo(p, true);
       if (!ammo) return;
@@ -826,7 +831,8 @@ export class Sim {
     const len = Math.hypot(dir.x, dir.y, dir.z) || 1;
     const spread = kind === 'arrow' || kind === 'spectral_arrow' ? .0075 : .0;
     const dx = dir.x / len + (this.rng() - .5) * spread, dy = dir.y / len + (this.rng() - .5) * spread, dz = dir.z / len + (this.rng() - .5) * spread;
-    const e = this.ents.spawn(kind, at.x + dx * .3, at.y + dy * .3 - .1, at.z + dz * .3, { owner, vx: dx * speed, vy: dy * speed, vz: dz * speed, data: { ...data } });
+    const o = launchPoint(at, { x: dx, y: dy, z: dz });
+    const e = this.ents.spawn(kind, o.x, o.y, o.z, { owner, vx: dx * speed, vy: dy * speed, vz: dz * speed, data: { ...data } });
     if (data.flame) e.fire = 100;
     if (data.potion) e.data.color = (data.potion as { color: number }).color;
     e.timer = kind === 'firework' ? 30 : kind === 'wind_charge' ? 200 : 1200;
@@ -1536,7 +1542,18 @@ export class Sim {
       food: p.hunger.food, saturation: Math.round(p.hunger.saturation * 10) / 10, air: Math.max(0, p.air), maxAir: 300,
       armor: a.armor, toughness: a.toughness, effects: p.effects.view(), fire: p.fire, freeze: p.freeze,
       move: this.profileOf(p), spectator: p.spectator, bar: p.xpBar || undefined, barLevel: p.xpLevel || undefined,
+      cd: this.cooldownView(p),
     };
+  }
+  /** Running item cooldowns (thrown items, a shield knocked down by an axe). */
+  private cooldownView(p: VPlayer): SelfView['cd'] {
+    const out: [number, number, number][] = [];
+    for (const [id, end] of p.cooldowns) {
+      if (end <= this.tickNo) { p.cooldowns.delete(id); continue; }
+      out.push([id, end, THROWN[VITEM[id]?.key ?? '']?.cooldown ?? 20]);
+    }
+    if (p.shieldDisabledUntil > this.tickNo) out.push([VI.shield, p.shieldDisabledUntil, SHIELD_DISABLE_TICKS]);
+    return out.length ? out : undefined;
   }
   private sync(): void {
     // Entities: spawns and removals now, positions every tick for movers.

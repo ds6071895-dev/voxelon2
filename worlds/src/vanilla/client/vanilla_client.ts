@@ -16,7 +16,9 @@ import { mergeInto, placeBlock, stationOf, useBlock, type PlaceCtx } from '../bl
 import { VMETA } from '../blocks';
 import { VITEM, VI } from '../items';
 import { breakTicks } from '../tools';
-import { attackStats, cooldownScale } from '../combat';
+import { attackStats, bowPower, cooldownScale } from '../combat';
+import { BOW, CROSSBOW, THROWN, TRIDENT, aimDir, launchPoint } from '../ranged';
+import { enchLevel } from '../stack';
 import { EntityView3D } from './entity_view';
 import { VanillaHud } from './vanilla_hud';
 import { InventoryUI } from './inventory_ui';
@@ -25,6 +27,7 @@ import './icon_tints';
 import { segmentHitsBox } from '../entity';
 import type { BlockHit, FxEvent, MAction, MPayload, SelfView } from '../messages';
 import type { VStack } from '../stack';
+import { OFFHAND as OFFHAND_SLOT } from '../inventory_model';
 import type { BodyStyle } from '../../remoteplayers';
 
 export interface VanillaDeps {
@@ -42,6 +45,13 @@ export interface VanillaDeps {
   clearCrack(): void;
   swing(): void;
   setBowDraw(f: number): void;
+  /** First-person ranged motion (bow release, crossbow load/fire, throws). */
+  held?: {
+    releaseBow(power: number): void;
+    setCrossbow(charge: number, loaded: 'arrow' | 'rocket' | null): void;
+    fireCrossbow(): void;
+    throwItem(): void;
+  };
   sound(name: string, at?: THREE.Vector3, pitch?: number): void;
   burst(kind: string, x: number, y: number, z: number, color?: number, n?: number): void;
   hurtFlash(id: number): void;
@@ -100,6 +110,15 @@ export class VanillaClient {
   serverNow(): number { return this.clockServer + performance.now() - this.clockLocal; }
   private boltMeshes: { mesh: THREE.Object3D; until: number }[] = [];
   private cooldownEl: HTMLElement;
+  /** Ring around the crosshair: draw/charge while using, item cooldown after. */
+  private aimEl: HTMLElement;
+  private aimArc: SVGCircleElement;
+  private aimLabel: HTMLElement;
+  /** Item cooldowns by item id (performance.now ms); server ones merge in from `self`. */
+  private cds = new Map<number, { start: number; end: number }>();
+  private cdSeen = new Set<string>();
+  /** Our own shots' sounds play at once; the server's echo of them is skipped. */
+  private localSounds = new Map<string, number>();
 
   constructor(readonly d: VanillaDeps) {
     this.hud = new VanillaHud(d.app);
@@ -108,23 +127,40 @@ export class VanillaClient {
       send: (win, slot, button, mode, rev, hotbar) => d.send({ k: 'click', win, slot, button, mode, rev, hotbar }),
       close: (win) => d.send({ k: 'closeWin', win }),
       onOpenChange: () => d.onPanel(),
+      selected: () => d.inventory.selected,
     });
     this.menu = new MenuUI(d.app, d.atlas.canvas, (menu, id) => d.send({ k: 'menu', menu, id }), () => d.onPanel());
     this.cooldownEl = document.createElement('div');
     this.cooldownEl.className = 'v-cooldown';
     this.cooldownEl.appendChild(document.createElement('i'));
     this.hud.root.appendChild(this.cooldownEl);
+    this.aimEl = document.createElement('div');
+    this.aimEl.className = 'v-aim';
+    this.aimEl.hidden = true;
+    this.aimEl.innerHTML = '<svg viewBox="0 0 40 40" aria-hidden="true"><circle class="v-aim-track" cx="20" cy="20" r="15"/><circle class="v-aim-arc" cx="20" cy="20" r="15" pathLength="100"/></svg><b></b>';
+    this.aimArc = this.aimEl.querySelector('.v-aim-arc') as SVGCircleElement;
+    this.aimLabel = this.aimEl.querySelector('b') as HTMLElement;
+    this.hud.root.appendChild(this.aimEl);
   }
 
   get panelOpen(): boolean { return this.invUI.open || this.menu.open || !!this.presenter?.panelOpen?.(); }
   get spectating(): boolean { return !!this.self?.spectator; }
   get frozen(): boolean { return !!this.self?.move.frozen || !!this.presenter?.frozen?.(); }
   heldStack(): VStack | null { return this.slots[this.d.inventory.selected] ?? null; }
+  offhandStack(): VStack | null { return this.slots[OFFHAND_SLOT] ?? null; }
+  /** The current right-click use (shield, food, bow…) comes from the offhand. */
+  usingOffhand = false;
 
   enter(mode: EngineMode, _spec: WorldSpec): void {
     if (this.active) this.exit();
     this.active = true; this.mode = mode;
     this.ents = new EntityView3D(this.d.scene, this.d.atlas);
+    this.ents.myId = this.d.myId();
+    this.ents.solidAt = (x, y, z) => {
+      const b = this.d.world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z));
+      return b !== Block.Air && !!collisionBoxes(b) && !BLOCKS[b]?.fluid;
+    };
+    this.cds.clear(); this.cdSeen.clear();
     this.hud.reset(); this.hud.show(true);
     this.self = null; this.state = null;
     this.slots = new Array(46).fill(null);
@@ -143,6 +179,8 @@ export class VanillaClient {
     this.invUI.hide(); this.menu.close();
     this.hud.show(false);
     this.d.clearCrack(); this.d.setBowDraw(0);
+    this.aimEl.hidden = true; this.cds.clear();
+    for (const el of document.querySelectorAll<HTMLElement>('#hotbar > .slot')) { const band = el.children[2] as HTMLElement | undefined; if (band) band.style.height = '0%'; }
     const p = this.d.player;
     p.moveKindAt = undefined; p.vanilla = null; p.boat = null; this.rideEnt = null; p.speedMult = 1; p.jumpBoost = 0; p.setBodyScale(1); p.gliding = false;
     p.damageSink = undefined;
@@ -162,7 +200,7 @@ export class VanillaClient {
         this.state = d.s; this.presenter?.onState(d.s);
         break;
       }
-      case 'self': this.self = d.v; this.hud.setSelf(d.v); if(d.v.move.gliding!==undefined)this.d.player.gliding=d.v.move.gliding; break;
+      case 'self': this.self = d.v; this.hud.setSelf(d.v); this.mergeCooldowns(d.v.cd); if(d.v.move.gliding!==undefined)this.d.player.gliding=d.v.move.gliding; break;
       case 'inv': {
         this.slots = d.v.slots;
         this.d.inventory.restore(d.v.slots.slice(0, 36), this.d.inventory.selected);
@@ -213,7 +251,7 @@ export class VanillaClient {
     if (inv.selected !== this.selected) {
       this.selected = inv.selected;
       this.d.send({ k: 'select', slot: inv.selected });
-      if (this.usingSince >= 0) { this.usingSince = -1; this.d.setBowDraw(0); }
+      if (this.usingSince >= 0) { this.usingSince = -1; this.usingOffhand = false; this.d.setBowDraw(0); }
       this.stopDig();
     }
     if (this.spectating || this.frozen) {
@@ -260,27 +298,142 @@ export class VanillaClient {
     if (input.leftDown && target && !hitPlayer && !entHit) this.dig(target, now);
     else this.stopDig();
     // Right: use / place, release ends a draw.
-    const use = stack ? (VITEM[stack.id]?.use ?? (VITEM[stack.id]?.food ? 'food' : null)) : null;
-    const isBlock = !!stack && (VITEM[stack.id]?.block !== undefined || (BLOCKS[stack.id] && !VITEM[stack.id]?.use));
+    // Which hand acts, mirroring Sim.use: the main hand unless it has nothing to
+    // do here, then the offhand (a shield, food, a bow, or blocks on a face).
+    const useOf = (st: VStack | null) => st ? (VITEM[st.id]?.use ?? (VITEM[st.id]?.food ? 'food' : null)) : null;
+    const blockOf = (st: VStack | null) => !!st && (VITEM[st.id]?.block !== undefined || (!!BLOCKS[st.id] && !VITEM[st.id]?.use));
+    const mainActs = !!stack && (!!useOf(stack) || !!VITEM[stack.id]?.armor || (blockOf(stack) && !!target));
+    const off = this.offhandStack();
+    const offActs = !mainActs && !!off && (!!useOf(off) || (blockOf(off) && !!target));
+    const hand = offActs ? off : stack;
+    const use = useOf(hand);
+    const isBlock = blockOf(hand);
     if (input.rightClicked || (input.rightDown && isBlock && now >= this.placeAt)) {
       this.placeAt = now + PLACE_REPEAT_MS;
       const hit = target ? this.blockHit(target, eye, look) : undefined;
       const ride = !p.boat && entHit && this.ents?.hitTargets().find((e) => e.id === entHit!.id)?.kind && ['boat','minecart','sheep'].includes(this.ents!.hitTargets().find((e) => e.id === entHit!.id)!.kind) ? entHit.id : undefined;
       this.d.send({ k: 'use', slot: inv.selected, block: ride === undefined ? hit : undefined, ent: ride, yaw: p.yaw, pitch: p.pitch });
-      if (isBlock && hit && ride === undefined && stack) this.predictPlace(stack, hit, now);
+      if (isBlock && hit && ride === undefined && hand) this.predictPlace(hand, hit, now);
       if (isBlock && hit) this.d.swing();
-      if (input.rightClicked && (use === 'bow' || use === 'crossbow' || use === 'trident' || use === 'food' || use === 'drink' || use === 'shield')) this.usingSince = now;
+      const ready = !!hand && !this.coolingDown(hand.id, now);
+      const loaded = use === 'crossbow' && !!hand?.charged;
+      if (input.rightClicked && ready && !loaded && (use === 'bow' || use === 'crossbow' || use === 'trident' || use === 'food' || use === 'drink' || use === 'shield')) { this.usingSince = now; this.usingOffhand = offActs; }
       if (use === 'firework' && p.gliding) p.boostTicks = 22 + Math.floor(Math.random() * 8);
-      if (use === 'throw' || use === 'splash' || use === 'lingering' || use === 'rod') this.d.swing();
+      if (input.rightClicked && ready && hand && loaded) this.fireCrossbow(hand, eye, offActs, now);
+      if (input.rightClicked && ready && hand && (use === 'throw' || use === 'splash' || use === 'lingering')) this.throwLocal(hand, eye, offActs, now);
+      if (use === 'rod') this.d.swing();
     }
     if (this.usingSince >= 0) {
-      if (use === 'bow' || use === 'trident') this.d.setBowDraw(Math.min(1, (now - this.usingSince) / 1000));
+      const ticks = (now - this.usingSince) / 50;
+      if (!this.usingOffhand && use === 'bow') this.d.setBowDraw(bowPower(ticks));
+      if (!this.usingOffhand && use === 'trident') this.d.setBowDraw(Math.min(1, ticks / TRIDENT.minTicks));
       if (!input.rightDown) {
-        this.usingSince = -1; this.d.setBowDraw(0);
+        const wasOff = this.usingOffhand;
+        this.usingSince = -1; this.usingOffhand = false; this.d.setBowDraw(0);
         this.d.send({ k: 'useEnd', slot: inv.selected, yaw: p.yaw, pitch: p.pitch });
+        if (hand && use === 'bow') this.releaseBow(hand, ticks, eye, wasOff, now);
+        if (hand && use === 'trident' && ticks >= TRIDENT.minTicks) this.shootLocal('trident', eye, aimDir(p.yaw, p.pitch, TRIDENT.lift), TRIDENT.speed, wasOff, 'trident');
       }
     }
-    void VI;
+    // The crossbow in hand shows its string and bolt.
+    const main = this.heldStack();
+    if (main && VITEM[main.id]?.use === 'crossbow') {
+      const charging = this.usingSince >= 0 && !this.usingOffhand && use === 'crossbow';
+      const need = CROSSBOW.charge(enchLevel(main, 'quick_charge'));
+      this.d.held?.setCrossbow(charging ? (now - this.usingSince) / 50 / need : 0,
+        main.charged ? (main.charged === VI.firework_rocket ? 'rocket' : 'arrow') : null);
+    }
+    this.aimFrame(now, use, hand);
+  }
+
+  private coolingDown(id: number, now: number): boolean { const c = this.cds.get(id); return !!c && now < c.end; }
+  private startCooldown(id: number, ticks: number, now: number): void { if (ticks >= 1) this.cds.set(id, { start: now, end: now + ticks * 50 }); }
+  /** Server cooldowns (an axe knocking the shield down, throws we didn't predict). */
+  private mergeCooldowns(list: [number, number, number][] | undefined): void {
+    const now = performance.now(), live = new Set<string>();
+    for (const [id, end, total] of list ?? []) {
+      const key = `${id}:${end}`;
+      live.add(key);
+      if (this.cdSeen.has(key)) continue;
+      this.cdSeen.add(key);
+      const mine = this.cds.get(id);
+      if (mine && now - mine.start < 600 && now < mine.end) continue;
+      this.startCooldown(id, total, now);
+    }
+    for (const k of this.cdSeen) if (!live.has(k)) this.cdSeen.delete(k);
+  }
+  private playLocal(name: string, pitch?: number): void { this.localSounds.set(name, performance.now()); this.d.sound(name, undefined, pitch); }
+  /** Draw our own shot at once; the server's copy takes over when it arrives. */
+  private shootLocal(kind: Parameters<EntityView3D['predict']>[0], eye: THREE.Vector3, dir: { x: number; y: number; z: number }, speed: number, offhand: boolean, sound: string, color?: number, pitch?: number): void {
+    const p = this.d.player;
+    const at = launchPoint(eye, dir);
+    // Leave from the hand (lower right, or left for the offhand), then join the true path.
+    const side = offhand ? -1 : 1;
+    const from = new THREE.Vector3(Math.cos(p.yaw) * .32 * side, -.28, -Math.sin(p.yaw) * .32 * side);
+    this.ents?.predict(kind, at, { x: dir.x * speed, y: dir.y * speed, z: dir.z * speed }, from, color);
+    if (sound) this.playLocal(sound, pitch);
+  }
+  private hasArrows(bow: VStack): boolean {
+    return enchLevel(bow, 'infinity') > 0 || this.slots.some((s, i) => i <= OFFHAND_SLOT && !!s && (s.id === VI.arrow || s.id === VI.spectral_arrow));
+  }
+  private releaseBow(bow: VStack, ticks: number, eye: THREE.Vector3, offhand: boolean, _now: number): void {
+    const power = bowPower(ticks);
+    if (power < .1 || !this.hasArrows(bow)) return;
+    const p = this.d.player;
+    const spectral = !this.slots.some((s, i) => i <= OFFHAND_SLOT && s?.id === VI.arrow) && this.slots.some((s) => s?.id === VI.spectral_arrow);
+    this.shootLocal(spectral ? 'spectral_arrow' : 'arrow', eye, aimDir(p.yaw, p.pitch, BOW.lift), power * BOW.speed, offhand, 'bow', undefined, power);
+    if (!offhand) this.d.held?.releaseBow(power);
+  }
+  private fireCrossbow(cb: VStack, eye: THREE.Vector3, offhand: boolean, _now: number): void {
+    const p = this.d.player;
+    const rocket = cb.charged === VI.firework_rocket;
+    const multi = enchLevel(cb, 'multishot') > 0;
+    for (const off of multi ? [0, -10, 10] : [0]) {
+      const dir = aimDir(p.yaw + off * Math.PI / 180, p.pitch, rocket ? 0 : CROSSBOW.lift);
+      this.shootLocal(rocket ? 'firework' : 'arrow', eye, dir, rocket ? CROSSBOW.rocketSpeed : CROSSBOW.speed, offhand, off === 0 ? 'crossbow_shoot' : '');
+    }
+    if (!offhand) this.d.held?.fireCrossbow();
+  }
+  private throwLocal(s: VStack, eye: THREE.Vector3, offhand: boolean, now: number): void {
+    const t = THROWN[VITEM[s.id]?.key ?? ''];
+    if (!t) return;
+    const p = this.d.player;
+    this.shootLocal(t.kind, eye, aimDir(p.yaw, p.pitch, t.lift), t.speed, offhand, t.kind === 'ender_pearl' ? 'pearl_throw' : 'throw', s.potion?.color);
+    this.startCooldown(s.id, t.cooldown, now);
+    if (!offhand) this.d.held?.throwItem(); else this.d.swing();
+  }
+  /** The crosshair ring: bow draw, crossbow load, trident wind-up; else the held item's cooldown. */
+  private aimFrame(now: number, use: string | null, hand: VStack | null): void {
+    let frac = -1, label = '', tone = '';
+    if (this.usingSince >= 0 && (use === 'bow' || use === 'crossbow' || use === 'trident') && hand) {
+      const ticks = (now - this.usingSince) / 50;
+      frac = use === 'bow' ? bowPower(ticks) : use === 'trident' ? Math.min(1, ticks / TRIDENT.minTicks)
+        : Math.min(1, ticks / CROSSBOW.charge(enchLevel(hand, 'quick_charge')));
+      tone = frac >= 1 ? 'full' : 'charge';
+    } else {
+      const sel = this.heldStack();
+      const c = sel ? this.cds.get(sel.id) : undefined;
+      if (c && now < c.end && c.end - c.start >= 400) {
+        frac = (c.end - now) / (c.end - c.start);
+        label = ((c.end - now) / 1000).toFixed(1);
+        tone = 'cd';
+      } else if (sel && VITEM[sel.id]?.use === 'crossbow' && sel.charged) { frac = 1; tone = 'loaded'; }
+    }
+    this.aimEl.hidden = frac < 0 || this.spectating;
+    if (frac >= 0) {
+      this.aimArc.style.strokeDashoffset = String(100 - Math.round(frac * 100));
+      this.aimEl.dataset.tone = tone;
+      if (this.aimLabel.textContent !== label) this.aimLabel.textContent = label;
+    }
+    // Hotbar: a dark band over each slot whose item is cooling down, shrinking as it ends.
+    const bar = document.querySelectorAll<HTMLElement>('#hotbar > .slot');
+    for (let i = 0; i < bar.length && i < 9; i++) {
+      const st = this.slots[i], c = st ? this.cds.get(st.id) : undefined;
+      const band = bar[i].children[2] as HTMLElement | undefined;
+      if (!band) continue;
+      const h = c && now < c.end ? `${Math.round((c.end - now) / (c.end - c.start) * 100)}%` : '0%';
+      if (band.style.height !== h) band.style.height = h;
+    }
   }
 
   /** Where on a block face the crosshair hits (slabs, stairs, trapdoors need the height). */
@@ -398,7 +551,14 @@ export class VanillaClient {
   private fx(f: FxEvent): void {
     const at = (x?: number, y?: number, z?: number) => x !== undefined && y !== undefined && z !== undefined ? new THREE.Vector3(x, y, z) : undefined;
     switch (f.f) {
-      case 'sound': this.d.sound(f.s, at(f.x, f.y, f.z), f.pitch); break;
+      case 'sound': {
+        // Our own shot already played this sound when we fired.
+        const mine = this.localSounds.get(f.s);
+        if (mine !== undefined && performance.now() - mine < 900 && f.x !== undefined && f.z !== undefined
+          && Math.hypot(f.x - this.d.player.pos.x, f.z - this.d.player.pos.z) < 2.5) { this.localSounds.delete(f.s); break; }
+        this.d.sound(f.s, at(f.x, f.y, f.z), f.pitch);
+        break;
+      }
       case 'burst': this.d.burst(f.kind, f.x, f.y, f.z, f.color, f.n); break;
       case 'explode': this.d.burst('explode', f.x, f.y, f.z, 0xe6bc77, Math.round(20 + f.power * 8)); break;
       case 'firework': this.d.burst('firework', f.x, f.y, f.z, f.color, 40); this.d.sound('firework_blast', at(f.x, f.y, f.z)); break;

@@ -51,31 +51,59 @@ body.vanilla-active .item-name { bottom: calc(var(--hotbar-slot) + 38px + var(--
 .v-cooldown[hidden] { display: none; }
 .v-cooldown i { display: block; height: 100%; width: 0; border-radius: 2px; background: #fff; }
 
-/* Inventory, crafting, furnace, chest */
+/* Inventory, crafting, furnace, chest: one compact card of recessed slot
+   trays. Slots touch-tile with 2px seams, the hotbar row carries a cool blue
+   tint and marks the selected slot, the craft result glows gold. */
 .v-inv-scrim, .v-menu-scrim, .v-results-scrim { display: flex; z-index: 45; }
-.v-inv { width: min(520px, 100%); gap: 10px; user-select: none; }
-.v-inv-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.v-inv-head b { font-size: 18px; font-weight: 850; }
-.v-inv-done { min-height: 36px; padding: 6px 16px; }
-.v-inv-top { display: flex; gap: 22px; align-items: center; justify-content: center; padding: 10px; border-radius: 16px; background: #eef3f8; }
-.v-inv-armor { display: grid; gap: 4px; }
-.v-inv-craft { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: center; }
-.v-inv-label { font-size: 10.5px; font-weight: 800; letter-spacing: 1.6px; text-transform: uppercase; color: var(--w-ink-mute); width: 100%; }
-.v-arrow { font-style: normal; font-size: 22px; font-weight: 900; color: var(--w-ink-mute); }
-.v-grid { display: grid; gap: 4px; justify-content: center; }
+.w-dialog.v-inv {
+  --vs: 40px;
+  width: auto; max-width: 100%; gap: 8px; padding: 10px 12px 10px; border-radius: 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #f3f6fa 100%);
+  box-shadow: 0 0 0 1px rgba(18,32,50,.08), 0 24px 60px rgba(12,22,36,.35);
+  user-select: none;
+}
+.v-inv-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: -2px -4px 0 2px; }
+.v-inv-head b { font-size: 14px; font-weight: 850; letter-spacing: -.1px; }
+.v-inv-x {
+  width: 26px; height: 26px; border: 0; border-radius: 8px; padding: 0; cursor: pointer;
+  background: transparent; color: var(--w-ink-mute); font: 700 20px/1 var(--w-font);
+}
+.v-inv-x:hover { background: #eef2f7; color: var(--w-ink); }
+.v-inv-top {
+  display: flex; gap: 14px; align-items: center; justify-content: center; padding: 8px 10px; border-radius: 12px;
+  background: linear-gradient(135deg, #e9f1ff 0%, #f2f7ee 100%);
+  box-shadow: inset 0 0 0 1px rgba(45,110,224,.1);
+}
+.v-inv-top-chest, .v-inv-top-barrel { padding: 4px; background: #e6ebf2; box-shadow: none; }
+.v-inv-gear { display: flex; align-items: flex-end; gap: 6px; margin-right: auto; }
+.v-inv-off { display: grid; justify-items: center; gap: 3px; }
+.v-inv-key {
+  min-width: 16px; padding: 1px 4px; border-radius: 4px; text-align: center;
+  background: #fff; box-shadow: 0 1px 0 rgba(18,32,50,.18); font: 800 9.5px/1.4 var(--w-font); color: var(--w-ink-mute);
+}
+.v-inv-craft { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.v-inv-label { font-size: 9.5px; font-weight: 800; letter-spacing: 1.4px; text-transform: uppercase; color: var(--w-ink-mute); width: 100%; }
+.v-arrow { width: 18px; height: 12px; background: #9aabbf; clip-path: polygon(0 35%, 55% 35%, 55% 0, 100% 50%, 55% 100%, 55% 65%, 0 65%); }
+.v-inv-store { display: grid; gap: 6px; }
+.v-grid { display: grid; gap: 2px; justify-content: center; padding: 3px; border-radius: 10px; background: #dfe5ed; }
+.v-inv-top .v-grid { background: rgba(18,32,50,.1); }
 .v-grid-2 { grid-template-columns: repeat(2, auto); }
 .v-grid-3 { grid-template-columns: repeat(3, auto); }
 .v-grid-9 { grid-template-columns: repeat(9, auto); }
-.v-hotbar { margin-top: 4px; }
+.v-hotbar { background: #cfdcef; }
 .v-slot {
-  width: 46px; height: 46px; position: relative; display: grid; place-items: center; cursor: pointer;
-  border-radius: 10px; background: #fff; box-shadow: inset 0 0 0 1px var(--w-line), 0 2px 4px rgba(18,32,50,.06);
+  width: var(--vs, 40px); height: var(--vs, 40px); position: relative; display: grid; place-items: center; cursor: pointer;
+  border-radius: 7px; background: linear-gradient(180deg, #fbfcfe, #eef2f7);
+  box-shadow: inset 0 -1px 0 rgba(18,32,50,.08), 0 1px 0 rgba(255,255,255,.7);
+  transition: background .08s, box-shadow .08s;
 }
-.v-slot:hover { box-shadow: inset 0 0 0 2px #2d6ee0; }
-.v-slot canvas { width: 34px; height: 34px; image-rendering: pixelated; }
+.v-slot:hover { background: #eaf2ff; box-shadow: inset 0 0 0 2px #2d6ee0; }
+.v-slot.sel { box-shadow: inset 0 0 0 2px #2d6ee0, 0 0 0 1px rgba(45,110,224,.25); background: linear-gradient(180deg, #ffffff, #e4eeff); }
+.v-slot canvas { width: calc(var(--vs, 40px) * .76); height: calc(var(--vs, 40px) * .76); image-rendering: pixelated; filter: drop-shadow(0 1px 0 rgba(18,32,50,.18)); }
+.v-slot.empty canvas { filter: none; }
 .v-slot.empty[data-role]::after {
   position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none;
-  font-size: 9px; font-weight: 800; letter-spacing: .6px; text-transform: uppercase; color: rgba(18,32,50,.28);
+  font-size: 8px; font-weight: 800; letter-spacing: .5px; text-transform: uppercase; color: rgba(18,32,50,.24);
 }
 .v-slot.empty[data-role="head"]::after { content: 'Head'; }
 .v-slot.empty[data-role="chest"]::after { content: 'Chest'; }
@@ -83,13 +111,26 @@ body.vanilla-active .item-name { bottom: calc(var(--hotbar-slot) + 38px + var(--
 .v-slot.empty[data-role="feet"]::after { content: 'Feet'; }
 .v-slot.empty[data-role="offhand"]::after { content: 'Off'; }
 .v-slot.empty[data-role="fuel"]::after { content: 'Fuel'; }
-.v-slot[data-role="result"] { width: 54px; height: 54px; background: #fff8e6; }
-.v-count { position: absolute; right: 4px; bottom: 1px; font: 800 12px/1 var(--w-font); color: var(--w-ink); text-shadow: 0 0 3px #fff, 0 0 2px #fff; }
+.v-slot[data-role="offhand"] { background: linear-gradient(180deg, #fffdf6, #f3ecdc); box-shadow: inset 0 0 0 1px rgba(184,115,12,.22); }
+.v-slot[data-role="result"] {
+  --vs: 48px; background: linear-gradient(180deg, #fffaf0, #fbefd2);
+  box-shadow: inset 0 0 0 1px rgba(184,115,12,.35), 0 3px 10px rgba(184,115,12,.14);
+}
+.v-slot[data-role="result"]:not(.empty) { box-shadow: inset 0 0 0 2px #e0a42a, 0 0 14px rgba(224,164,42,.35); }
+.v-count { position: absolute; right: 3px; bottom: 1px; font: 850 11px/1 var(--w-font); color: var(--w-ink); text-shadow: 0 0 2px #fff, 0 0 2px #fff, 0 0 3px #fff; }
 .v-slot.glint canvas { filter: drop-shadow(0 0 3px #b57cff) saturate(1.2); }
-.v-inv-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.v-drop { padding: 8px 14px; border-radius: 10px; background: #fdecee; color: #a3202a; font-size: 12px; font-weight: 800; cursor: pointer; }
-.v-inv-hint { font-size: 11px; color: var(--w-ink-mute); }
-.v-touch-mode { min-height: 36px; padding: 6px 14px; }
+.v-inv-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.v-drop {
+  padding: 4px 10px; border-radius: 7px; background: #fdecee; color: #a3202a; cursor: pointer;
+  font-size: 11px; font-weight: 800; box-shadow: inset 0 0 0 1px rgba(163,32,42,.15);
+}
+.v-drop:hover { background: #fbdde1; }
+.v-inv-hint { font-size: 10.5px; color: var(--w-ink-mute); display: flex; flex-wrap: wrap; align-items: center; gap: 2px 3px; }
+.v-inv-hint kbd {
+  padding: 1px 5px; border-radius: 4px; background: #eef2f7; box-shadow: 0 1px 0 rgba(18,32,50,.15);
+  font: 800 9.5px/1.4 var(--w-font); color: var(--w-ink-soft);
+}
+.v-touch-mode { min-height: 30px; padding: 4px 12px; }
 .v-inv.touch-pending .v-slot { box-shadow: inset 0 0 0 2px #f2c230; }
 .v-cursor { position: fixed; left: 0; top: 0; z-index: 60; pointer-events: none; width: 40px; height: 40px; }
 .v-cursor[hidden] { display: none; }
@@ -145,14 +186,30 @@ body.vanilla-active .item-name { bottom: calc(var(--hotbar-slot) + 38px + var(--
 .v-results-row small { color: var(--w-ink-mute); font-weight: 700; font-variant-numeric: tabular-nums; }
 .v-results-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
 
-.touch-ui .v-slot { width: 40px; height: 40px; }
+.touch-ui .w-dialog.v-inv { --vs: 40px; }
 .touch-ui .v-effects { right: calc(12px + var(--safe-right, 0px)); top: calc(60px + var(--safe-top, 0px)); }
 @media (max-width: 560px) {
-  .v-slot { width: 34px; height: 34px; }
-  .v-slot canvas { width: 26px; height: 26px; }
-  .v-inv-top { gap: 10px; }
+  .w-dialog.v-inv { --vs: 32px; padding: 8px; }
+  .v-inv-top { gap: 8px; padding: 6px; }
 }
 
 /* Party start sheet */
 .w-check { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px; background: #f4f7fb; font-size: 13px; font-weight: 750; cursor: pointer; }
 .w-check input { width: 18px; height: 18px; accent-color: #2d6ee0; }
+
+/* Ranged items: a ring around the crosshair fills while a bow draws, a
+   crossbow loads or a trident winds up (gold + pulse when ready), and drains
+   with the seconds left while the held item cools down. */
+.v-aim { position: absolute; left: 50%; top: 50%; width: 40px; height: 40px; transform: translate(-50%, -50%); pointer-events: none; }
+.v-aim[hidden] { display: none; }
+.v-aim svg { width: 100%; height: 100%; transform: rotate(-90deg); overflow: visible; }
+.v-aim circle { fill: none; stroke-width: 2.5; }
+.v-aim-track { stroke: rgba(18, 32, 50, .32); }
+.v-aim-arc { stroke: #fff; stroke-linecap: round; stroke-dasharray: 100 100; stroke-dashoffset: 100; filter: drop-shadow(0 0 1px rgba(0, 0, 0, .55)); }
+.v-aim[data-tone="full"] .v-aim-arc, .v-aim[data-tone="loaded"] .v-aim-arc { stroke: #ffd257; }
+.v-aim[data-tone="full"] { animation: v-aim-ready .5s ease-out; }
+.v-aim[data-tone="cd"] .v-aim-arc { stroke: rgba(255, 255, 255, .8); }
+.v-aim b { position: absolute; left: 50%; top: calc(100% + 2px); transform: translateX(-50%); font: 700 11px/1 system-ui, sans-serif; color: #fff; text-shadow: 0 1px 2px rgba(0, 0, 0, .7); font-variant-numeric: tabular-nums; }
+.v-aim b:empty { display: none; }
+@keyframes v-aim-ready { 0% { transform: translate(-50%, -50%) scale(1); } 40% { transform: translate(-50%, -50%) scale(1.18); } 100% { transform: translate(-50%, -50%) scale(1); } }
+body.reduced-motion .v-aim { animation: none; }

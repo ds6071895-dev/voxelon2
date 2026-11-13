@@ -24,6 +24,8 @@ interface Deps {
   send(win: number, slot: number, button: 0 | 1, mode: ClickMode, rev: number, hotbar?: number): void;
   close(win: number): void;
   onOpenChange(open: boolean): void;
+  /** The selected hotbar slot (0-8), marked in the inventory's hotbar row. */
+  selected?(): number;
 }
 
 const ENCH_LABEL: Record<string, string> = {
@@ -38,7 +40,7 @@ export class InventoryUI {
   private card: HTMLElement | null = null;
   private cursorEl: HTMLElement | null = null;
   private tip: HTMLElement | null = null;
-  private slotEls: { el: HTMLElement; canvas: HTMLCanvasElement; count: HTMLElement; index: number }[] = [];
+  private slotEls: { el: HTMLElement; canvas: HTMLCanvasElement; count: HTMLElement; index: number; bar: number }[] = [];
   private inv: InvState = emptyInventory();
   private win: (Win & { id: number; kind: WindowView['kind']; cook?: number; burn?: number }) | null = null;
   private rev = 0;
@@ -94,26 +96,30 @@ export class InventoryUI {
     const card = this.card = uiEl('div', 'w-dialog v-inv', scrim);
     card.dataset.kind = kind;
     const head = uiEl('div', 'v-inv-head', card);
-    uiEl('b', '', head, kind === 'inventory' ? 'Inventory' : kind === 'crafting' ? 'Crafting' : kind === 'furnace' ? 'Furnace' : kind === 'smoker' ? 'Smoker' : kind === 'barrel' ? 'Barrel' : 'Chest');
-    uiButton(head, 'Done', () => this.requestClose(), 'w-btn v-inv-done');
+    uiEl('b', '', head, kind === 'inventory' ? 'Inventory' : kind === 'crafting' ? 'Crafting Table' : kind === 'furnace' ? 'Furnace' : kind === 'smoker' ? 'Smoker' : kind === 'barrel' ? 'Barrel' : 'Chest');
+    const x = uiButton(head, '×', () => this.requestClose(), 'v-inv-x');
+    x.setAttribute('aria-label', 'Close');
     this.slotEls = [];
-    const top = uiEl('div', 'v-inv-top', card);
+    const top = uiEl('div', `v-inv-top v-inv-top-${kind}`, card);
     const n = this.win ? this.win.slots.length : 0;
     if (kind === 'inventory') {
-      const armor = uiEl('div', 'v-inv-armor', top);
+      const gear = uiEl('div', 'v-inv-gear', top);
+      const armor = uiEl('div', 'v-grid v-inv-armor', gear);
       for (let i = 0; i < 4; i++) this.slot(armor, 36 + i, ['head', 'chest', 'legs', 'feet'][i]);
-      this.slot(armor, 40, 'offhand');
+      const off = uiEl('div', 'v-inv-off', gear);
+      this.slot(off, 40, 'offhand');
+      uiEl('small', 'v-inv-key', off, 'F');
       const craft = uiEl('div', 'v-inv-craft', top);
       uiEl('small', 'v-inv-label', craft, 'Crafting');
       const grid = uiEl('div', 'v-grid v-grid-2', craft);
       for (let i = 0; i < 4; i++) this.slot(grid, 41 + i);
-      uiEl('i', 'v-arrow', craft, '→');
+      uiEl('i', 'v-arrow', craft);
       this.slot(craft, 45, 'result');
     } else if (kind === 'crafting') {
       const craft = uiEl('div', 'v-inv-craft', top);
       const grid = uiEl('div', 'v-grid v-grid-3', craft);
       for (let i = 0; i < 9; i++) this.slot(grid, i);
-      uiEl('i', 'v-arrow', craft, '→');
+      uiEl('i', 'v-arrow', craft);
       this.slot(craft, 9, 'result');
     } else if (kind === 'furnace' || kind === 'smoker') {
       const f = uiEl('div', 'v-furnace', top);
@@ -128,12 +134,12 @@ export class InventoryUI {
       const grid = uiEl('div', 'v-grid v-grid-9', top);
       for (let i = 0; i < n; i++) this.slot(grid, i);
     }
-    uiEl('small', 'v-inv-label', card, 'Inventory');
-    const main = uiEl('div', 'v-grid v-grid-9', card);
+    const store = uiEl('div', 'v-inv-store', card);
+    const main = uiEl('div', 'v-grid v-grid-9', store);
     const base = kind === 'inventory' ? 0 : n;
     for (let i = 9; i < 36; i++) this.slot(main, kind === 'inventory' ? i : base + (i - 9));
-    const bar = uiEl('div', 'v-grid v-grid-9 v-hotbar', card);
-    for (let i = 0; i < 9; i++) this.slot(bar, kind === 'inventory' ? i : base + 27 + i);
+    const bar = uiEl('div', 'v-grid v-grid-9 v-hotbar', store);
+    for (let i = 0; i < 9; i++) this.slot(bar, kind === 'inventory' ? i : base + 27 + i, undefined, i);
     const tools = uiEl('div', 'v-inv-tools', card);
     const drop = uiEl('div', 'v-drop', tools, 'Drop');
     drop.addEventListener('mousedown', (e) => { e.preventDefault(); if (this.inv.cursor) this.act(-999, e.button === 2 ? 1 : 0, 'drop'); });
@@ -141,7 +147,12 @@ export class InventoryUI {
       for (const [label, mode] of [['Split', 'split'], ['Move', 'quick'], ['Drop', 'drop']] as const) {
         uiButton(tools, label, () => { this.touchMode = this.touchMode === mode ? null : mode; this.render(); }, 'w-btn v-touch-mode');
       }
-    } else uiEl('small', 'v-inv-hint', tools, 'Shift-click moves · Right-click splits · 1-9 / F swap · click outside to drop');
+    } else {
+      const hint = uiEl('small', 'v-inv-hint', tools);
+      for (const [k, t] of [['Shift', 'move'], ['Right', 'split'], ['1-9', 'swap'], ['F', 'offhand']]) {
+        uiEl('kbd', '', hint, k); hint.append(` ${t} `);
+      }
+    }
     this.cursorEl = uiEl('div', 'v-cursor', this.d.app);
     this.cursorEl.appendChild(document.createElement('canvas'));
     uiEl('span', '', this.cursorEl);
@@ -150,7 +161,7 @@ export class InventoryUI {
     this.render();
   }
 
-  private slot(parent: HTMLElement, index: number, role?: string): void {
+  private slot(parent: HTMLElement, index: number, role?: string, bar = -1): void {
     const el = uiEl('div', 'v-slot', parent);
     if (role) el.dataset.role = role;
     const canvas = document.createElement('canvas'); canvas.width = canvas.height = 32;
@@ -172,7 +183,7 @@ export class InventoryUI {
     el.addEventListener('contextmenu', (e) => e.preventDefault());
     el.addEventListener('mouseenter', () => { this.hover = index; this.showTip(index); });
     el.addEventListener('mouseleave', () => { if (this.hover === index) this.hover = -1; if (this.tip) this.tip.hidden = true; });
-    this.slotEls.push({ el, canvas, count, index });
+    this.slotEls.push({ el, canvas, count, index, bar });
   }
 
   private stackAt(index: number): VStack | null {
@@ -194,7 +205,9 @@ export class InventoryUI {
   }
 
   private render(): void {
+    const sel = this.d.selected?.() ?? -1;
     for (const s of this.slotEls) {
+      if (s.bar >= 0) s.el.classList.toggle('sel', s.bar === sel);
       const st = this.stackAt(s.index);
       s.el.classList.toggle('empty', !st);
       if (st) {

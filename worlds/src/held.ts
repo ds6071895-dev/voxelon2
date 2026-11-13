@@ -16,6 +16,8 @@ import { createGunModel, poseGunModel, GUN_FEEL } from './gunmodels';
 import { createGadgetModel, isModeledGadget, poseGadgetModel } from './gadgetmodels';
 import { HEAL_BEAT } from './healuse';
 import { createBowModel, poseBowModel, poseBowDraw } from './bowmodel';
+import { createCrossbowModel, createTridentModel, poseCrossbow, poseRangedModel } from './rangedmodels';
+import { VITEM } from './vanilla/items';
 import { cloneModelMaterials } from './model_bake';
 
 /** 0..1 ease with flat ends, clamped outside the range. */
@@ -89,6 +91,13 @@ export class HeldItemView {
   private readonly material: THREE.MeshBasicMaterial;
   private mesh: THREE.Object3D | null = null;
   private currentItem: number | null = null;
+  /** Offhand (vanilla modes, F): its own camera-space pivot, mirrored to the left. */
+  private readonly offPivot: THREE.Group;
+  private offMesh: THREE.Mesh | null = null;
+  private offItem: number | null = null;
+  private offEquipT = 1;
+  private offRaise = 0;
+  private offRaised = false;
   private swingT = 1; // 0..1, animating while < 1
   /** Fires once whenever a new hand/tool swing begins. */
   onSwing?: () => void;
@@ -99,6 +108,11 @@ export class HeldItemView {
   private isGun = false;
   private bowPower = 0;
   private bowReleaseT = 1;
+  /** Bows, crossbows, tridents and throwables get their own hold and motion. */
+  private ranged: 'bow' | 'crossbow' | 'trident' | 'throw' | null = null;
+  private crossCharge = 0;
+  private crossLoaded: 'arrow' | 'rocket' | null = null;
+  private throwT = 1;
   private isGadgetModel = false;
   /** A placeable block: shown as a bare mini-cube, with no fist behind it. */
   private isBlockItem = false;
@@ -188,6 +202,12 @@ export class HeldItemView {
     this.pivot.renderOrder = 100;
     this.pivot.visible = false;
     camera.add(this.pivot);
+
+    this.offPivot = new THREE.Group();
+    this.offPivot.position.set(-BASE_X, BASE_Y, BASE_Z);
+    this.offPivot.renderOrder = 100;
+    this.offPivot.visible = false;
+    camera.add(this.offPivot);
 
     this.fx = new THREE.Group();
     this.fx.renderOrder = 102;
@@ -279,7 +299,30 @@ export class HeldItemView {
   setActive(active: boolean): void {
     this.pivot.visible = active;
     this.fx.visible = active;
+    this.offPivot.visible = active && !!this.offMesh;
   }
+
+  /** The offhand stack's item (null = empty). Drawn low on the left, mirrored. */
+  setOffItem(id: number | null): void {
+    if (id === this.offItem) return;
+    this.offItem = id;
+    if (this.offMesh) { this.offPivot.remove(this.offMesh); this.offMesh = null; }
+    if (id !== null) {
+      const block = ITEMS[id]?.kind === 'block';
+      const mesh = new THREE.Mesh(block ? itemGeometry(this.atlas, id) : itemGeometrySolid(this.atlas, id, 0.44, 0.04), this.material);
+      mesh.scale.setScalar(block ? 0.95 : 1.05);
+      if (block) { mesh.rotation.set(0.32, 0.78, 0); mesh.position.set(-0.02, -0.03, 0); }
+      else mesh.rotation.set(0.1, 0.6, 0);
+      mesh.renderOrder = 100;
+      this.offMesh = mesh;
+      this.offPivot.add(mesh);
+      this.offEquipT = 0;
+    }
+    this.offPivot.visible = this.pivot.visible && !!this.offMesh;
+  }
+
+  /** Raise the offhand item (a shield being held up, food being eaten). */
+  setOffRaised(on: boolean): void { this.offRaised = on; }
 
   setItem(id: number | null): void {
     // Keep the final consumed pad in view long enough to finish its spring snap.
@@ -288,6 +331,11 @@ export class HeldItemView {
     this.currentItem = id;
     this.bowPower = 0;
     this.bowReleaseT = 1;
+    this.crossCharge = 0;
+    this.throwT = 1;
+    const use = id !== null ? VITEM[id]?.use : undefined;
+    this.ranged = id === Item.BridgeBow || use === 'bow' ? 'bow' : use === 'crossbow' ? 'crossbow' : use === 'trident' ? 'trident'
+      : use === 'throw' || use === 'splash' || use === 'lingering' ? 'throw' : null;
     this.isGun = id !== null && !!ITEMS[id]?.gun;
     this.isGadgetModel = id !== null && isModeledGadget(id);
     this.isBlockItem = id !== null && ITEMS[id]?.kind === 'block';
@@ -320,9 +368,12 @@ export class HeldItemView {
         this.anchorEject = model.getObjectByName('eject') ?? null;
         this.anchorSight = model.getObjectByName('sight') ?? null;
         this.anchorGrip2 = model.getObjectByName('grip2') ?? null;
-      } else if (id === Item.BridgeBow) {
-        this.mesh = createBowModel();
-        poseBowModel(this.mesh, 'firstPerson');
+      } else if (this.ranged === 'bow' || this.ranged === 'crossbow' || this.ranged === 'trident') {
+        if (this.ranged === 'bow') { this.mesh = createBowModel(); poseBowModel(this.mesh, 'firstPerson'); }
+        else {
+          this.mesh = this.ranged === 'crossbow' ? createCrossbowModel() : createTridentModel();
+          poseRangedModel(this.mesh, this.ranged, 'firstPerson');
+        }
         this.modelMats = cloneModelMaterials(this.mesh);
         for (const mat of this.modelMats) mat.userData.bowColor = mat.color.getHex();
       } else if (this.isGadgetModel) {
@@ -362,8 +413,30 @@ export class HeldItemView {
     this.arm.visible = !this.isBlockItem;
   }
 
-  /** Set the bow pose; ordinary tools never enter it. */
+  /** Set the bow pose; ordinary tools never enter it. Tridents use it as their wind-up. */
   setBowDraw(power: number): void { this.bowPower = clamp(power, 0, 1); }
+
+  /** Crossbow: string pulled back 0..1 while loading, and what sits on the rail. */
+  setCrossbow(charge: number, loaded: 'arrow' | 'rocket' | null): void {
+    this.crossCharge = clamp(charge, 0, 1);
+    this.crossLoaded = loaded;
+  }
+
+  /** A crossbow shot: hard kick, string snaps forward. */
+  fireCrossbow(): void {
+    this.crossLoaded = null;
+    this.crossCharge = 0;
+    this.onSwing?.();
+    this.kickVZ += 2.2;
+    this.kickVPitch += 1.1;
+    this.kickVRoll -= .3;
+  }
+
+  /** An overarm throw: fling forward and up, then the next one rises into view. */
+  throwItem(): void {
+    this.throwT = 0;
+    this.onSwing?.();
+  }
 
   releaseBow(power: number): void {
     this.bowPower = 0;
@@ -454,7 +527,9 @@ export class HeldItemView {
     if (this.equipT < 1) this.equipT = Math.min(1, this.equipT + dt / 0.34);
     this.recoilPulse = Math.max(0, this.recoilPulse - dt * 5);
     this.idleT += dt;
-    const aimTarget = this.currentItem === Item.BridgeBow ? this.bowPower
+    const aimTarget = this.ranged === 'bow' ? this.bowPower
+      : this.ranged === 'crossbow' ? (this.crossLoaded ? .7 : 0)
+      : this.ranged === 'trident' ? this.bowPower * .5
       : this.isGun && aiming && reloadProgress < 0 ? 1 : 0;
     this.aimT += (aimTarget - this.aimT) * Math.min(1, dt * 14);
     const aim = smoothstep(this.aimT);
@@ -468,7 +543,7 @@ export class HeldItemView {
     if (this.flashT < 1) this.flashT = Math.min(1, this.flashT + dt / 0.075);
 
     let px = BASE_X, py = BASE_Y, pz = BASE_Z, rx = 0, ry = 0, rz = 0;
-    if (this.currentItem === Item.BridgeBow && this.mesh) {
+    if (this.ranged === 'bow' && this.mesh) {
       this.bowReleaseT = Math.min(1, this.bowReleaseT + dt / .3);
       // A snap shot visibly plucks and settles the string after firing.
       // This animation never delays the arrow or changes its strength.
@@ -487,8 +562,40 @@ export class HeldItemView {
       this.offArm.position.x += .045;
       this.offArm.position.y -= .035;
       this.offArm.rotation.set(.15, -.7, 0);
+      // A full draw trembles a little: the shot is ready.
+      if (this.bowPower >= 1) { px += Math.sin(this.idleT * 41) * .0035; py += Math.sin(this.idleT * 37) * .0035; }
+    }
+    if (this.ranged === 'crossbow' && this.mesh) {
+      poseCrossbow(this.mesh, this.crossCharge, this.crossLoaded);
+      // Loading: nose dips and the stock comes back toward you as the string is cranked.
+      const c = this.crossLoaded ? 0 : smoothstep(this.crossCharge);
+      rx -= c * .55; py -= c * .06; pz += c * .08; rz += c * .18;
+      py += Math.sin(this.idleT * 30) * c * .004;
+      // Loaded: shouldered and centred under the crosshair.
+      px -= aim * .3; py += aim * .1; ry += aim * .12; rz -= aim * .08;
+    }
+    if (this.ranged === 'trident' && this.mesh) {
+      // Wind-up: raised over the shoulder and pulled back, point toward the crosshair.
+      const c = smoothstep(this.bowPower);
+      px -= c * .12; py += c * .16; pz += c * .08; rx += c * .22; ry += c * .3;
+      if (this.bowPower >= .5) { px += Math.sin(this.idleT * 43) * .003; py += Math.sin(this.idleT * 39) * .003; }
+    }
+    if (this.ranged && this.ranged !== 'throw' && this.mesh) {
       for (const mat of this.modelMats)
         mat.color.setHex(mat.userData.bowColor).multiplyScalar(shade);
+    }
+    if (this.throwT < 1) {
+      // A short overarm fling (forward, up, nose down), then the next item
+      // rises from below the way a fresh equip does.
+      this.throwT = Math.min(1, this.throwT + dt / .42);
+      const t = this.throwT, REL = .3;
+      if (t < REL) {
+        const u = t / REL, f = Math.sin(u * Math.PI * .5);
+        px -= f * .08; py += f * .14 - u * u * .05; pz -= f * .32; rx -= f * 1.1; rz -= f * .25;
+      } else {
+        const k = 1 - easeOut((t - REL) / (1 - REL));
+        py -= k * .45; pz += k * .05; rx += k * .8; rz += k * .3;
+      }
     }
     if (this.isGun && this.mesh) {
       // Aiming squares the weapon up with the view; hip fire keeps the relaxed
@@ -599,6 +706,7 @@ export class HeldItemView {
     }
     this.pivot.position.set(px, py, pz);
     this.pivot.rotation.set(rx, ry, rz);
+    if (this.offMesh) this.poseOffhand(dt);
 
     if (this.isGun) {
       this.poseParts(reloadProgress, aim);
@@ -618,6 +726,27 @@ export class HeldItemView {
       this.flash.visible = false;
     }
     this.stepFx(dt);
+  }
+
+  /** The offhand shares sway, bob and breathing with the main hand, mirrored,
+   *  but never the main hand's swing, recoil or draw. */
+  private poseOffhand(dt: number): void {
+    if (this.offEquipT < 1) this.offEquipT = Math.min(1, this.offEquipT + dt / 0.34);
+    this.offRaise += ((this.offRaised ? 1 : 0) - this.offRaise) * Math.min(1, dt * 14);
+    let px = -BASE_X + this.swayX, py = BASE_Y + this.swayY, pz = BASE_Z;
+    let rx = this.swayY * 1.5, ry = this.swayX * 1.6, rz = -this.swayX * 1.1;
+    const bobAmp = this.bobWeight * 0.022;
+    px -= Math.sin(this.bobPhase) * bobAmp;
+    py += -Math.abs(Math.cos(this.bobPhase)) * bobAmp * 0.85;
+    rz -= Math.sin(this.bobPhase) * bobAmp * 1.6;
+    px += Math.sin(this.idleT * 0.9 + 1) * 0.004;
+    py += Math.sin(this.idleT * 1.35 + 1) * 0.005;
+    const k = 1 - easeOut(this.offEquipT);
+    py -= k * 0.42; pz += k * 0.1; rx += k * 0.95; rz -= k * 0.5;
+    const r = smoothstep(this.offRaise);
+    px += r * 0.16; py += r * 0.1; pz += r * 0.08; ry -= r * 0.5;
+    this.offPivot.position.set(px, py, pz);
+    this.offPivot.rotation.set(rx, ry, rz);
   }
 
   // --- Motion layers ---------------------------------------------------------

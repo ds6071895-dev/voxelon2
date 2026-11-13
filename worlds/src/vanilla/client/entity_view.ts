@@ -11,6 +11,20 @@ import { ITEMS } from '../../items';
 import type { Atlas } from '../../textures';
 import { ENT_FLAG, type EntityView } from '../messages';
 import { MOB_KINDS, animateMob, buildMob, mobFlags, type MobRig } from './mob_models';
+import { KINDS, type EntityKind } from '../entity';
+
+/** A projectile in flight, run on locally between 20 Hz server positions.
+ *  `pos`/`vel` are the server's latest state (blocks, blocks/tick), `at` when
+ *  it arrived; the drawn point is that state stepped forward by elapsed time
+ *  (+ `lead` for our own shots, which we drew before the server had them),
+ *  plus a visual error `err` that bleeds away so corrections never snap. */
+interface Flight {
+  pos: THREE.Vector3; vel: THREE.Vector3; at: number; lead: number; err: THREE.Vector3;
+  g: number; drag: number; stopped: boolean;
+  /** Local-only shot waiting for the server's copy. */
+  ghost?: { born: number; owner: number };
+}
+const FLY_MAX_TICKS = 3;
 
 interface View extends MobRig {
   target: THREE.Vector3; prev: THREE.Vector3; hp?: number;
@@ -18,6 +32,7 @@ interface View extends MobRig {
   fuse?: THREE.Mesh; size?: number;
   /** Driven locally (the boat you're sitting in): server moves are ignored. */
   held?: boolean;
+  fly?: Flight;
 }
 
 /** How long a killed mob lies on its side before it vanishes (seconds). */
@@ -26,6 +41,11 @@ const DEATH_S = .9;
 export class EntityView3D {
   readonly group = new THREE.Group();
   private readonly views = new Map<number, View>();
+  private ghostSeq = 0;
+  /** Is this point inside a solid block? Stops extrapolated shots at walls. */
+  solidAt: ((x: number, y: number, z: number) => boolean) | null = null;
+  /** Our own player id, to claim our predicted shots. */
+  myId = -1;
   private readonly itemMat: THREE.MeshBasicMaterial;
   private readonly glowMat = new THREE.MeshBasicMaterial({ color: 0xfff1a8, transparent: true, opacity: .5, depthWrite: false });
   private readonly flameMat = new THREE.MeshBasicMaterial({ color: 0xf2581a, transparent: true, opacity: .85, depthWrite: false });
@@ -39,13 +59,14 @@ export class EntityView3D {
 
   apply(msg: { spawn?: EntityView[]; u?: number[]; gone?: number[]; dead?: number[]; reset?: boolean }): void {
     if (msg.reset) this.clear();
-    for (const e of msg.spawn ?? []) if (!this.views.has(e.id)) this.add(e);
+    for (const e of msg.spawn ?? []) if (!this.views.has(e.id)) { this.add(e); this.adopt(e); }
     const u = msg.u ?? [];
     for (let i = 0; i + 6 < u.length; i += 7) {
       const v = this.views.get(u[i]);
       if (!v || v.held) continue;
       v.prev.copy(v.group.position);
       v.target.set(u[i + 1] / 100, u[i + 2] / 100, u[i + 3] / 100);
+      if (v.fly) this.flightUpdate(v, v.fly);
       v.yaw = u[i + 4] / 100;
       const now = performance.now();
       if ((u[i + 5] & ENT_FLAG.hurt) && !(v.flags & ENT_FLAG.hurt)) v.hurtUntil = now + 350;
@@ -94,6 +115,11 @@ export class EntityView3D {
     const now = performance.now();
     for (const v of this.views.values()) {
       v.age += dt;
+      if (v.fly) {
+        if (v.fly.ghost && now - v.fly.ghost.born > 900) { this.remove(v.id); continue; }
+        this.flightFrame(v, v.fly, dt, now);
+        continue;
+      }
       const before = v.group.position.clone();
       v.group.position.lerp(v.target, k);
       const moved = Math.hypot(v.group.position.x - before.x, v.group.position.z - before.z) / Math.max(dt, 1e-3);
@@ -142,6 +168,13 @@ export class EntityView3D {
     };
     group.position.set(e.x, e.y, e.z);
     group.rotation.y = e.yaw;
+    const info = KINDS[e.kind as EntityKind];
+    if (info?.projectile && e.kind !== 'bobber') {
+      v.fly = {
+        pos: new THREE.Vector3(e.x, e.y, e.z), vel: new THREE.Vector3((e.vx ?? 0) / 20, (e.vy ?? 0) / 20, (e.vz ?? 0) / 20),
+        at: performance.now(), lead: 0, err: new THREE.Vector3(), g: info.gravity, drag: info.drag, stopped: false,
+      };
+    }
     this.build(v, e);
     this.views.set(e.id, v);
     this.group.add(group);
@@ -161,6 +194,87 @@ export class EntityView3D {
     });
     this.views.delete(id);
   }
+  /** Draw our own shot now; the server's copy takes it over when it arrives.
+   *  `from` is a visual start offset (the hand) that bleeds into the real path. */
+  predict(kind: EntityKind, pos: { x: number; y: number; z: number }, vel: { x: number; y: number; z: number }, from?: THREE.Vector3, color?: number): void {
+    const id = -(++this.ghostSeq);
+    this.add({ id, kind, x: pos.x, y: pos.y, z: pos.z, yaw: 0, vx: vel.x * 20, vy: vel.y * 20, vz: vel.z * 20, flags: 0, color });
+    const v = this.views.get(id)!;
+    if (!v.fly) { this.remove(id); return; }
+    v.fly.ghost = { born: performance.now(), owner: this.myId };
+    if (from) v.fly.err.copy(from);
+    this.flightFrame(v, v.fly, 0, performance.now());
+  }
+  /** A server projectile of ours replaces the matching local one, keeping its place on screen. */
+  private adopt(e: EntityView): void {
+    const v = this.views.get(e.id);
+    if (!v?.fly || e.owner === undefined || e.owner !== this.myId) return;
+    const now = performance.now();
+    let best: View | null = null, bestDot = .9;
+    const dir = v.fly.vel.clone().normalize();
+    for (const g of this.views.values()) {
+      if (!g.fly?.ghost || g.kind !== e.kind) continue;
+      const d = g.fly.vel.clone().normalize().dot(dir);
+      if (d > bestDot) { bestDot = d; best = g; }
+    }
+    if (!best) return;
+    const f = v.fly, gf = best.fly!;
+    // How far ahead of the server's copy our drawing is: the ghost's age minus
+    // the server copy's (distance from the ghost's start along the path).
+    const speed = Math.max(.05, f.vel.length());
+    const serverAge = best.fly!.pos.distanceTo(f.pos) / speed;
+    const ghostAge = (now - gf.ghost!.born) / 50;
+    f.lead = THREE.MathUtils.clamp(ghostAge - serverAge, 0, 10) / 20;
+    this.flightFrame(v, f, 0, now);
+    f.err.copy(best.group.position).sub(v.group.position).add(f.err);
+    if (f.err.lengthSq() > 16) f.err.set(0, 0, 0);
+    this.flightFrame(v, f, 0, now);
+    this.remove(best.id);
+  }
+  private flightUpdate(v: View, f: Flight): void {
+    const now = performance.now();
+    const shown = v.group.position.clone();
+    const moved = v.target.clone().sub(f.pos);
+    f.vel.copy(moved).multiplyScalar(f.drag);
+    f.vel.y -= f.g;
+    f.stopped = moved.lengthSq() < 1e-6;
+    f.pos.copy(v.target);
+    f.at = now;
+    // Keep what's on screen where it is; the difference bleeds out.
+    f.err.set(0, 0, 0);
+    this.flightFrame(v, f, 0, now);
+    f.err.copy(shown).sub(v.group.position);
+    if (f.err.lengthSq() > 16) f.err.set(0, 0, 0);
+    v.group.position.copy(shown);
+  }
+  private flightFrame(v: View, f: Flight, dt: number, now: number): void {
+    f.err.multiplyScalar(Math.exp(-dt * 14));
+    const ticks = f.stopped ? 0 : Math.min(FLY_MAX_TICKS + f.lead * 20, (now - f.at) / 50 + f.lead * 20);
+    const p = this.extrapolate(f, ticks);
+    v.group.position.copy(p).add(f.err);
+    if (!f.stopped && (v.kind === 'arrow' || v.kind === 'spectral_arrow' || v.kind === 'trident' || v.kind === 'firework')) {
+      const dir = new THREE.Vector3(f.vel.x, f.vel.y - f.g * ticks, f.vel.z);
+      if (dir.lengthSq() > 1e-6) v.group.lookAt(v.group.position.clone().add(dir));
+    } else if (!f.stopped) {
+      v.group.rotation.x += dt * 9; v.group.rotation.z += dt * 6;
+    }
+  }
+  /** The server state run `ticks` ahead (drag ~ linear over a few ticks), stopping at solid blocks. */
+  private extrapolate(f: Flight, ticks: number): THREE.Vector3 {
+    const out = f.pos.clone();
+    const steps = Math.ceil(ticks * 2);
+    if (!steps) return out;
+    const h = ticks / steps;
+    const vel = f.vel.clone();
+    for (let i = 0; i < steps; i++) {
+      const nx = out.x + vel.x * h, ny = out.y + vel.y * h, nz = out.z + vel.z * h;
+      if (this.solidAt?.(nx, ny, nz)) break;
+      out.set(nx, ny, nz);
+      vel.multiplyScalar(Math.pow(f.drag, h)); vel.y -= f.g * h;
+    }
+    return out;
+  }
+
   clear(): void { for (const id of [...this.views.keys()]) this.remove(id); }
   dispose(): void { this.clear(); this.itemMat.dispose(); this.glowMat.dispose(); this.flameMat.dispose(); this.flameCoreMat.dispose(); this.group.removeFromParent(); }
 

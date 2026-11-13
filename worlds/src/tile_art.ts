@@ -12,6 +12,10 @@
 
 import { Tile } from './blocks';
 import { hash2 } from './noise';
+import {
+  rock, granular, boards, bark, endGrain, capture, glassPane, knit, type Paint as MPaint,
+} from './tile_materials';
+import { enrich, grainPick } from './tile_kit';
 
 export type RGBA = [number, number, number, number];
 interface Canvas16 {
@@ -40,22 +44,8 @@ export function pick(pal: RGBA[], t: number, x: number, y: number, amount = .8):
   return pal[Math.max(0, Math.min(pal.length - 1, Math.round(v)))];
 }
 
-/** Tileable value noise over the 16px tile: `cell` must divide 16. */
-export function tnoise(seed: number, x: number, y: number, cell: number): number {
-  const period = N / cell;
-  const gx = x / cell, gy = y / cell;
-  const x0 = Math.floor(gx), y0 = Math.floor(gy);
-  const fx = gx - x0, fy = gy - y0;
-  const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
-  const v = (ix: number, iy: number) => hash2(seed, ((ix % period) + period) % period, ((iy % period) + period) % period);
-  const a = v(x0, y0) + (v(x0 + 1, y0) - v(x0, y0)) * sx;
-  const b = v(x0, y0 + 1) + (v(x0 + 1, y0 + 1) - v(x0, y0 + 1)) * sx;
-  return a + (b - a) * sy;
-}
-/** Three octaves of tileable noise, 0..1. */
-export function tfbm(seed: number, x: number, y: number): number {
-  return tnoise(seed, x, y, 8) * .5 + tnoise(seed ^ 0x55, x, y, 4) * .32 + tnoise(seed ^ 0xaa, x, y, 2) * .18;
-}
+export { tnoise, tfbm } from './tile_kit';
+import { tnoise, tfbm } from './tile_kit';
 export function rnd(seed: number, x: number, y: number): number { return hash2(seed, x, y); }
 
 /** Paint a per-pixel buffer, then outline its opaque shape (sprites). */
@@ -102,86 +92,95 @@ export function bevel(u: number, v: number, w: number, h: number): number {
 // ── Terrain ─────────────────────────────────────────────────────────────────
 
 const STONE = ramp(0x61646c, 0x72757d, 0x81848c, 0x8e9199, 0x9b9ea6, 0xa9acb3);
-const paintStone: Paint = (p, seed) => {
-  p.fill((x, y) => {
-    let t = tfbm(seed, x, y) * 1.25 - .12;
-    // Faint strata and the odd hairline crack.
-    const crack = rnd(seed ^ 3, x >> 2, y) > .93 && (x + y) % 4 !== 0;
-    if (crack) t -= .45;
-    return pick(STONE, t, x, y, .9);
-  });
-};
+/** Natural stone: low faceted chips with hairline cracks. Shared with the
+ *  ores so an ore face always sits in the same rock as the stone around it. */
+export const STONE_OPTS = { cells: 4, crack: .3, relief: .75, facet: .18, grain: .35 };
+const paintStone: Paint = rock(STONE, STONE_OPTS);
 
-const DIRT = ramp(0x4f3421, 0x5d3e27, 0x6b4a2f, 0x795536, 0x86613f, 0x936d48);
-function dirtAt(seed: number, x: number, y: number): RGBA {
-  let t = tfbm(seed, x, y) * 1.2 - .08;
-  const r = rnd(seed ^ 9, x, y);
-  if (r > .94) t += .45;          // a pebble
-  else if (r < .06) t -= .4;       // a dark crumb
-  return pick(DIRT, t, x, y, .9);
-}
-const paintDirt: Paint = (p, seed) => p.fill((x, y) => dirtAt(seed, x, y));
+const DIRT = ramp(0x4a3020, 0x5a3b26, 0x6a472e, 0x7a5436, 0x88603f, 0x977048);
+const paintDirt: Paint = granular(DIRT, { clump: .55, pebbles: .055, crumbs: .07, grain: .9, accent: [hex(0x9a8a78), hex(0x3a2618)], accentRate: .018 });
 
-/** Grayscale grass: the mesher multiplies in the valley's grass colour. */
-const GRASS_GRAY = ramp(0x8c8c8c, 0xa2a2a2, 0xb6b6b6, 0xc8c8c8, 0xd9d9d9, 0xe8e8e8);
+/** Grayscale grass: the mesher multiplies in the valley's grass colour.
+ *  Built from short blades: each a 2-3px stroke, lit at its tip, with darker
+ *  turf showing between them. */
+const GRASS_GRAY = ramp(0x8a8a8a, 0x9f9f9f, 0xb3b3b3, 0xc6c6c6, 0xd8d8d8, 0xe9e9e9);
 const paintGrassTop: Paint = (p, seed) => {
-  p.fill((x, y) => {
-    // Short blades: vertical streaks two pixels tall, lit at the tip.
-    const blade = rnd(seed, x, y >> 1);
-    let t = tfbm(seed ^ 1, x, y) * .9 + blade * .35 - .1;
-    if ((y & 1) === 0 && blade > .78) t += .3;
-    return pick(GRASS_GRAY, t, x, y, .7);
-  });
-};
-
-const FRINGE = ramp(0x5f9f3e, 0x6eb049, 0x7dbf54, 0x8ccc60, 0x9dd86d);
-const paintGrassSide: Paint = (p, seed) => {
-  p.fill((x, y) => dirtAt(seed, x, y));
-  for (let x = 0; x < N; x++) {
-    // Blades hang 3-5 pixels, and a few longer drips reach further down.
-    let depth = 3 + Math.floor(rnd(seed ^ 31, x, 0) * 3);
-    if (rnd(seed ^ 77, x, 1) > .8) depth += 2;
-    for (let y = 0; y < depth; y++) {
-      const t = .95 - y / (depth + 1) * .7 + (rnd(seed ^ 5, x, y) - .5) * .3;
-      p.set(x, y, pick(FRINGE, t, x, y, .6));
+  const v = new Array(N * N).fill(0).map((_, i) => .36 + (tfbm(seed ^ 1, i & 15, i >> 4) - .5) * .3);
+  for (let i = 0; i < 34; i++) {
+    const x0 = Math.floor(rnd(seed, i, 0) * N), y0 = Math.floor(rnd(seed, i, 1) * N);
+    const len = 2 + Math.floor(rnd(seed, i, 2) * 2), lean = rnd(seed, i, 3) < .3 ? 1 : 0;
+    const tone = .5 + rnd(seed, i, 4) * .22;
+    for (let k = 0; k < len; k++) {
+      const x = (x0 + (k === len - 1 ? lean : 0)) & 15, y = (y0 - k + N) & 15;
+      v[y * N + x] = Math.max(v[y * N + x], tone + k / len * .18);
     }
-    // A soft shadow where the turf overhangs the soil.
-    p.set(x, depth, mix(dirtAt(seed, x, depth), hex(0x2e2016), .45));
+    // A shadow at the blade's foot.
+    const fy = (y0 + 1) & 15;
+    v[fy * N + x0] = Math.min(v[fy * N + x0], .2);
   }
+  p.fill((x, y) => pick(GRASS_GRAY, v[y * N + x], x, y, .25));
 };
 
-const SAND = ramp(0xcbb481, 0xd6c08c, 0xdfca98, 0xe7d4a4, 0xeedcaf, 0xf4e5bd);
-const paintSand: Paint = (p, seed) => {
-  p.fill((x, y) => {
-    // Wind ripples: gentle diagonal bands, plus scattered grains.
-    const ripple = Math.sin((y * 1.7 + x * .35 + tnoise(seed, x, y, 8) * 5) * .95) * .12;
-    let t = tfbm(seed, x, y) * .9 + ripple + .08;
-    const g = rnd(seed ^ 4, x, y);
-    if (g > .95) t += .3; else if (g < .05) t -= .3;
-    return pick(SAND, t, x, y, .8);
-  });
-};
+const FRINGE = ramp(0x5a9a3a, 0x6aac46, 0x7abd52, 0x8bcb5e, 0x9dd86d);
+function turfSide(top: (x: number, y: number, depth: number) => RGBA, base: number, extra: number, drip: number) {
+  return (p: Canvas16, seed: number): void => {
+    const dirt = capture(paintDirt, seed);
+    p.fill((x, y) => dirt[y * N + x]);
+    for (let x = 0; x < N; x++) {
+      // An irregular overhang: neighbouring columns share most of their depth.
+      let depth = base + Math.floor(tnoise(seed ^ 31, x, 0, 4) * extra + rnd(seed ^ 32, x, 0) * 1.4);
+      if (rnd(seed ^ 77, x, 1) > 1 - drip) depth += 2 + Math.floor(rnd(seed ^ 78, x, 1) * 2);
+      for (let y = 0; y < depth; y++) p.set(x, y, top(x, y, depth));
+      // Soft shadow where the turf overhangs the soil, then a lit soil lip.
+      p.set(x, depth, mix(dirt[depth * N + x], hex(0x22160e), .5));
+      if (depth + 1 < N) p.set(x, depth + 1, mix(dirt[(depth + 1) * N + x], hex(0x22160e), .2));
+    }
+  };
+}
+const paintGrassSide: Paint = turfSide((x, y, depth) => {
+  const t = .95 - y / (depth + 1) * .75 + (rnd(5, x, y) - .5) * .3;
+  return pick(FRINGE, t, x, y, .4);
+}, 3, 2.2, .22);
+const SAND = ramp(0xc9b07c, 0xd5bd89, 0xdfc996, 0xe8d4a3, 0xefddb0, 0xf6e7c0);
+const paintSand: Paint = granular(SAND, {
+  clump: .35, pebbles: .045, crumbs: .04, grain: .85, ripple: .09, relief: .8,
+  accent: [hex(0xb89a68), hex(0xfaf0d6), hex(0xc7a888)], accentRate: .03,
+});
 
+const sandGrain = granular(SAND, { clump: .3, pebbles: .03, crumbs: .03, grain: .6, relief: .6 });
 const paintSandstone: Paint = (p, seed) => {
+  // Compacted sand in three strata: a lit cap, a band, and a darker foot,
+  // each parting a thin shadowed line.
+  const g = capture(sandGrain, seed);
+  const E = enrich(SAND);
   p.fill((x, y) => {
-    // Three strata with a darker parting between them.
-    const band = y < 4 ? .75 : y < 10 ? .55 : .42;
-    let t = band + (tnoise(seed, x, y, 4) - .5) * .25;
-    if (y === 3 || y === 9) t -= .3;
-    if (y === 0) t += .2;
-    return pick(SAND, t, x, y, .6);
+    const wav = Math.round((tnoise(seed ^ 8, x, 0, 8) - .5) * 2);
+    const yy = y + wav;
+    if (yy === 4 || yy === 10) return E[1];
+    if (yy === 5 || yy === 11) return E[4];
+    const shade = yy < 4 ? .06 : yy > 10 ? -.12 : -.03;
+    return mix(g[y * N + x], shade > 0 ? E[5] : E[0], Math.abs(shade) * 2.5);
   });
+  for (let x = 0; x < N; x++) p.set(x, 0, E[5]);
 };
 const paintSandstoneTop: Paint = (p, seed) => {
+  const g = capture(sandGrain, seed);
+  const E = enrich(SAND);
   p.fill((x, y) => {
-    const edge = x === 0 || y === 0 || x === 15 || y === 15;
-    let t = .6 + (tfbm(seed, x, y) - .5) * .35;
-    if (edge) t -= .25;
-    return pick(SAND, t, x, y, .6);
+    const r = Math.min(x, y, 15 - x, 15 - y);
+    if (r === 0) return x === 0 || y === 0 ? E[4] : E[1];
+    if (r === 1) return mix(g[y * N + x], x === 1 || y === 1 ? E[5] : E[0], .3);
+    return g[y * N + x];
   });
 };
 
+/** Cobbles: rounded stones of mixed tone, each domed and lit from the
+ *  top-left, set in a dark recessed mortar. */
+/** Cobbles: rounded stones of mixed tone, lit on their top-left rims, set
+ *  in a dark recessed mortar. */
+export const COBBLE: Paint = (p, seed) => paintCobblestone(p, seed);
 const paintCobblestone: Paint = (p, seed) => {
+  const STONE_E = enrich(STONE);
   // Voronoi stones in a wrapping tile: each pixel belongs to its nearest
   // centre; where two centres tie, there is mortar.
   const pts: [number, number, number][] = [];
@@ -197,32 +196,20 @@ const paintCobblestone: Paint = (p, seed) => {
   };
   p.fill((x, y) => {
     const c = near(x + .5, y + .5);
-    if (c.edge < 1.1) return pick(STONE, .02, x, y, 0);
+    if (c.edge < .9) return STONE_E[0];
     const up = near(x + .5, y - .5), left = near(x - .5, y + .5);
     const down = near(x + .5, y + 1.5), right = near(x + 1.5, y + .5);
     let t = .35 + pts[c.id][2] * .35 + (tnoise(seed ^ 7, x, y, 2) - .5) * .2;
     if (up.id !== c.id || left.id !== c.id) t += .3;
     if (down.id !== c.id || right.id !== c.id) t -= .25;
-    return pick(STONE, t, x, y, .5);
+    return grainPick(STONE_E, t, x, y, seed, .45);
   });
 };
 
 // ── Wood ────────────────────────────────────────────────────────────────────
 
 /** Bark: vertical plates split by dark furrows. */
-export function barkSide(pal: RGBA[], furrowEvery: number) {
-  return (p: Canvas16, seed: number): void => {
-    p.fill((x, y) => {
-      const plate = Math.floor(x / furrowEvery);
-      const u = x % furrowEvery;
-      let t = .45 + rnd(seed, plate, Math.floor((y + plate * 5) / 5)) * .35 + (tnoise(seed ^ 3, x, y, 4) - .5) * .25;
-      if (u === 0) t -= .45;                   // furrow
-      else if (u === 1) t += .18;              // lit plate edge
-      if (rnd(seed ^ 8, plate, y) > .9) t -= .3; // a split in the plate
-      return pick(pal, t, x, y, .6);
-    });
-  };
-}
+export function barkSide(pal: RGBA[], furrowEvery: number): MPaint { return bark(pal, furrowEvery); }
 /** Birch / cherry bark: smooth skin with horizontal lenticels. */
 export function bandedBark(pal: RGBA[], mark: RGBA, markRate: number) {
   return (p: Canvas16, seed: number): void => {
@@ -238,20 +225,7 @@ export function bandedBark(pal: RGBA[], mark: RGBA, markRate: number) {
   };
 }
 /** End grain: a bark rim and growth rings around a pith. */
-export function logTop(bark: RGBA[], wood: RGBA[]) {
-  return (p: Canvas16, seed: number): void => {
-    p.fill((x, y) => {
-      if (x === 0 || y === 0 || x === 15 || y === 15) return pick(bark, .5 + (rnd(seed, x, y) - .5) * .5, x, y, .5);
-      const d = Math.hypot(x - 7.5, y - 7.5) + (tnoise(seed, x, y, 4) - .5) * 1.2;
-      const ring = Math.floor(d * .9) % 2 === 0;
-      let t = .7 - d / 12 + (ring ? .15 : -.12);
-      if (d < 1.2) t = .2; // pith
-      if (x === 1 || y === 1) t += .1;
-      if (x === 14 || y === 14) t -= .15;
-      return pick(wood, t, x, y, .5);
-    });
-  };
-}
+export function logTop(barkPal: RGBA[], wood: RGBA[]): MPaint { return endGrain(barkPal, wood); }
 
 const OAK_BARK = ramp(0x3a2816, 0x48331d, 0x574024, 0x654b2c, 0x735733);
 const OAK_WOOD = ramp(0x8a6636, 0x9c7641, 0xae874d, 0xbe965a, 0xcca567);
@@ -263,22 +237,7 @@ const CHERRY_BARK = ramp(0x2e1a1d, 0x3b2226, 0x4a2b30, 0x58353a, 0x664044);
 const CHERRY_WOOD = ramp(0xb0746f, 0xc3857f, 0xd3968f, 0xe0a79f);
 
 /** Four horizontal boards with grain, a shadowed seam and staggered joints. */
-export function planks(pal: RGBA[]) {
-  return (p: Canvas16, seed: number): void => {
-    p.fill((x, y) => {
-      const board = y >> 2, v = y & 3;
-      const joint = board % 2 ? 11 : 4;
-      const grain = tnoise(seed ^ board, x * .5, v * 2 + board * 4, 2);
-      let t = .5 + (rnd(seed, board, 0) - .5) * .25 + (grain - .5) * .35;
-      if (v === 0) t += .2;              // lit top edge of the board
-      if (v === 3) t = .02;              // seam
-      if (x === joint && v !== 3) t -= .35;
-      if (x === joint + 1 && v !== 3) t += .12;
-      if (rnd(seed ^ 3, x, y) > .96 && v === 1) t -= .3; // a knot
-      return pick(pal, t, x, y, .5);
-    });
-  };
-}
+export function planks(pal: RGBA[]): MPaint { return boards(pal); }
 const PLANK_OAK = ramp(0x6f4f2a, 0x87633a, 0x9c7445, 0xae8551, 0xc0965e, 0xcfa56b);
 const PLANK_CHERRY = ramp(0x9a615c, 0xb0746e, 0xc2857e, 0xd1968e, 0xdea7a0, 0xe8b7b0);
 
@@ -363,34 +322,14 @@ const paintWater: Paint = (p, seed) => {
   });
 };
 
-const SNOW = ramp(0xd3dfec, 0xe0e9f3, 0xebf1f8, 0xf4f8fc, 0xffffff);
-const paintSnow: Paint = (p, seed) => {
-  p.fill((x, y) => {
-    let t = .55 + (tfbm(seed, x, y) - .5) * .6;
-    if (rnd(seed ^ 5, x, y) > .97) t = 1;
-    return pick(SNOW, t, x, y, .6);
-  });
-};
-const paintSnowySide: Paint = (p, seed) => {
-  p.fill((x, y) => dirtAt(seed, x, y));
-  for (let x = 0; x < N; x++) {
-    let depth = 3 + Math.floor(rnd(seed ^ 31, x, 0) * 2);
-    if (rnd(seed ^ 77, x, 1) > .78) depth += 2;
-    for (let y = 0; y < depth; y++) p.set(x, y, pick(SNOW, .9 - y / depth * .55, x, y, .5));
-    p.set(x, depth, mix(dirtAt(seed, x, depth), hex(0x2e2016), .4));
-  }
-};
+const SNOW = ramp(0xcfdcea, 0xdde7f2, 0xe9f0f8, 0xf3f7fc, 0xffffff);
+const paintSnow: Paint = granular(SNOW, {
+  clump: .45, pebbles: .035, crumbs: .03, grain: .7, relief: .7, bias: .08,
+  accent: [hex(0xffffff), hex(0xc4d6ee)], accentRate: .025,
+});
+const paintSnowySide: Paint = turfSide((x, y, depth) => pick(SNOW, .95 - y / depth * .5 + (rnd(9, x, y) - .5) * .2, x, y, .4), 3, 2, .2);
 
-const paintGlass: Paint = (p, seed) => {
-  void seed;
-  p.fill((x, y) => {
-    const edge = x === 0 || y === 0 || x === 15 || y === 15;
-    if (edge) return (x + y) % 5 === 0 ? hex(0xf2fbff) : hex(0xbad8e4);
-    if ((x + y === 5 || x + y === 6) && x > 1 && x < 6) return hex(0xffffff, 230);
-    if (x + y === 20 && x > 9) return hex(0xe6f6fc, 220);
-    return CLEAR;
-  });
-};
+const paintGlass: Paint = glassPane(hex(0xb4d4e2), hex(0xdff2fa), 0);
 
 // ── Arena masonry ───────────────────────────────────────────────────────────
 
@@ -405,9 +344,16 @@ export function bricks(pal: RGBA[], mortar: RGBA, opts: {
     p.fill((x, y) => {
       const b = bondAt(x, y, w, h);
       const { u, v, mortar: m } = inBrick(x, y, b);
-      if (m) return opts.mortarDeco?.(x, y, seed) ?? mortar;
+      if (m) {
+        const d = opts.mortarDeco?.(x, y, seed);
+        if (d) return d;
+        // Mortar is recessed: shadowed right under a brick's foot.
+        return v === b.h - 1 && u !== b.w - 1 ? mix(mortar, hex(0x000000), .22) : mortar;
+      }
       const deco = opts.deco?.(x, y, u, v, b, seed);
       if (deco) return deco;
+      // A chipped corner now and then.
+      if ((u === 0 || u === w - 2) && (v === 0 || v === h - 2) && rnd(seed ^ 0x5c, b.id, u + v) > .8) return mix(mortar, pal[1], .5);
       let t = .45 + (rnd(seed, b.id, 0) - .5) * .3 + (tnoise(seed ^ 3, x, y, 4) - .5) * tex;
       const bv = bevel(u, v, w - 1, h - 1);
       t += bv > 0 ? .25 : bv < 0 ? -.2 : 0;
@@ -665,21 +611,6 @@ const paintTerracotta: Paint = (p, seed) => {
   });
 };
 
-/** Knitted wool: columns of V stitches, each lit on its left stroke. */
-function wool(pal: RGBA[]) {
-  return (p: Canvas16, seed: number): void => {
-    p.fill((x, y) => {
-      const u = x & 3, v = y & 3, arm = v >> 1;
-      const left = u === arm, right = u === 3 - arm;
-      let t = .42 + (tnoise(seed, x, y, 4) - .5) * .2;
-      if (left) t += .3;
-      else if (right) t += .08;
-      else t -= .2;                                  // the gap between stitches
-      if (rnd(seed ^ 1, x, y) > .96) t += .2;        // a stray fibre
-      return pick(pal, t, x, y, .35);
-    });
-  };
-}
 const CRIMSON = ramp(0x7c1a22, 0x98232c, 0xb22f37, 0xc93f44, 0xdc5754, 0xea7466);
 const COBALT = ramp(0x1c3a80, 0x244a98, 0x2e5bb0, 0x3b6ec4, 0x4f84d4, 0x6a9be0);
 const FERN = ramp(0x1f5a2a, 0x276d33, 0x2f823d, 0x3a9748, 0x4cab57, 0x66c06b);
@@ -956,10 +887,10 @@ export const WORLDS_ART: Partial<Record<Tile, Paint>> = {
   [Tile.GildedLamp]: lantern(BRASS, ramp(0xa4620e, 0xd48a1c, 0xf5b53a, 0xffdc7a, 0xfff6d2)),
   [Tile.Basalt]: paintBasalt,
   [Tile.Terracotta]: paintTerracotta,
-  [Tile.TeamWoolA]: wool(CRIMSON),
-  [Tile.TeamWoolB]: wool(COBALT),
-  [Tile.TeamWoolC]: wool(FERN),
-  [Tile.TeamWoolD]: wool(SAFFRON),
+  [Tile.TeamWoolA]: knit(CRIMSON),
+  [Tile.TeamWoolB]: knit(COBALT),
+  [Tile.TeamWoolC]: knit(FERN),
+  [Tile.TeamWoolD]: knit(SAFFRON),
   [Tile.PartyTileC]: paintCrumbleTile,
   [Tile.PartyTileD]: paintBlinkStone,
   [Tile.ParkourLaunchPad]: pad(CYAN_LIGHT, false),

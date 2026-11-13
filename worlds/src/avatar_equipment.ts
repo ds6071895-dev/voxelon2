@@ -3,6 +3,8 @@ import { applyAvatarSneak, releaseGunHold, poseGunHold, stridePose, type AvatarB
 import { createGunModel, isGunItem, poseGunModel } from './gunmodels';
 import { createGadgetModel, isModeledGadget, poseGadgetModel } from './gadgetmodels';
 import { createBowModel, poseBowModel, poseBowDraw } from './bowmodel';
+import { createCrossbowModel, createTridentModel, poseRangedModel } from './rangedmodels';
+import { VI } from './vanilla/items';
 import { itemGeometry } from './item_geometry';
 import { ITEMS, Item } from './items';
 import type { Atlas } from './textures';
@@ -86,8 +88,12 @@ export function createAvatarEquipment(
     kind = 'gun'; root = createGunModel(); poseGunModel(root, 'avatar');
   } else if (isModeledGadget(id)) {
     kind = 'gadget'; root = createGadgetModel(); poseGadgetModel(root, 'avatar');
-  } else if (id === Item.BridgeBow) {
+  } else if (id === Item.BridgeBow || id === VI.bow) {
     kind = 'bow'; root = createBowModel(); poseBowModel(root, 'avatar');
+  } else if (id === VI.crossbow || id === VI.trident) {
+    const crossbow = id === VI.crossbow;
+    kind = 'item'; root = crossbow ? createCrossbowModel() : createTridentModel();
+    poseRangedModel(root, crossbow ? 'crossbow' : 'trident', 'avatar');
   } else {
     kind = 'item'; root = heldItemRoot(atlas, id, itemMaterial);
   }

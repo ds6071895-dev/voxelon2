@@ -50,6 +50,8 @@ export interface SelfView {
   move: MoveProfile;
   /** True while in spectator mode (eliminated). */
   spectator: boolean;
+  /** Item cooldowns running now: [item id, server tick it ends, length in ticks]. */
+  cd?: [number, number, number][];
 }
 
 /** Client movement tuning derived from effects, attributes and equipment. */

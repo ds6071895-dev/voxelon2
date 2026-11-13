@@ -62,6 +62,11 @@ export class HUD {
   private readonly debugEl: HTMLElement;
   private readonly nameEl: HTMLDivElement;
   private nameTimer: number | undefined;
+  /** Vanilla modes' offhand (F), a lone slot left of the hotbar. */
+  private readonly offEl: HTMLDivElement;
+  private readonly offIcon: HTMLCanvasElement;
+  private readonly offCount: HTMLSpanElement;
+  private offKey = '';
   private renderedVersion = -1;
   private lastSelected = -1;
   debugVisible = false;
@@ -107,7 +112,34 @@ export class HUD {
       'transition:opacity 0.5s;opacity:0;';
     document.getElementById('app')!.appendChild(this.nameEl);
 
+    this.offEl = document.createElement('div');
+    this.offEl.id = 'offhand-slot';
+    this.offEl.className = 'slot';
+    this.offEl.hidden = true;
+    this.offIcon = document.createElement('canvas');
+    this.offIcon.width = this.offIcon.height = 32;
+    this.offCount = document.createElement('span');
+    this.offCount.className = 'count mc-font';
+    this.offEl.append(this.offIcon, this.offCount);
+    document.getElementById('app')!.appendChild(this.offEl);
+    // It sits just outside the hotbar's left edge, whatever width that has.
+    new ResizeObserver(() => {
+      this.offEl.style.setProperty('--hotbar-w', `${hotbar.offsetWidth}px`);
+    }).observe(hotbar);
+
     this.refresh();
+  }
+
+  /** Show the offhand stack (null hides the slot). */
+  setOffhand(stack: ({ id: number; count: number } & Parameters<typeof renderItemIcon>[3]) | null): void {
+    const key = stack ? `${stack.id}:${stack.count}:${stack.potion?.color ?? ''}` : '';
+    if (key === this.offKey) return;
+    this.offKey = key;
+    this.offEl.hidden = !stack;
+    if (!stack) { clearItemIcon(this.offIcon); this.offCount.textContent = ''; return; }
+    renderItemIcon(this.offIcon, this.atlasCanvas, stack.id, stack);
+    this.offCount.textContent = stack.count > 1 ? String(stack.count) : '';
+    this.offEl.setAttribute('aria-label', `Offhand: ${ITEMS[stack.id]?.name ?? 'Item'}`);
   }
 
   /** Redraw when the inventory changed; call once per frame. */

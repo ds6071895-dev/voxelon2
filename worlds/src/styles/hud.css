@@ -1254,3 +1254,14 @@
     .pg-done-title { margin: 10px 0 6px; font-size: 26px; font-weight: 950; line-height: 1; letter-spacing: 1px; }
     .pg-done-note { margin: 0; font-size: 12px; line-height: 1.5; color: #4f6679; }
     .pg-done-actions { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+
+/* Offhand (vanilla modes, F): a lone tray-backed slot left of the hotbar. */
+#offhand-slot {
+  position: absolute; z-index: 10; pointer-events: none;
+  bottom: calc(12px + var(--safe-bottom));
+  right: calc(50% + var(--hotbar-w, 400px) / 2 + 8px);
+  background: var(--hud-bg);
+  box-shadow: 0 0 0 1px var(--hud-accent-soft), 0 10px 28px rgba(0, 0, 0, .32), inset 0 0 0 1px rgba(255, 255, 255, .1);
+}
+#offhand-slot[hidden] { display: none; }
+body:not(.in-game) #offhand-slot { display: none; }

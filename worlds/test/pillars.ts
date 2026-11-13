@@ -5,6 +5,7 @@ import { GameServer, type Outbound } from '../src/net/server_core';
 import { Accounts } from '../src/net/accounts';
 import { mulberry32 } from '../src/noise';
 import { LOOT, tierChance } from '../src/pillars_loot';
+import { VITEM } from '../src/vanilla/items';
 import { LP, borderSize, lavaLevel, lootBoost, lootInterval, lpPillars, lpSeed, lpUnseed, ringRadius, voidY } from '../src/pillars_rules';
 import type { ServerMsg } from '../src/net/protocol';
 
@@ -15,13 +16,17 @@ export function runPillarsTests(): number {
   const t = (_name: string, fn: () => void) => { fn(); n++; };
   console.log('▸ Lucky Pillars');
 
-  t('loot table totals and tier odds match the source', () => {
+  t('loot table totals and tier odds (source table minus mobs, potions, snowballs, eggs)', () => {
     const total = (r: string) => LOOT.filter((e) => e.rarity === r).reduce((s, e) => s + e.weight, 0);
-    assert.deepEqual(['common', 'uncommon', 'rare', 'epic', 'legendary'].map(total), [430, 247, 112, 42, 7]);
-    assert.ok(near(tierChance('common', 1), .513, .002));
-    assert.ok(near(tierChance('legendary', 1), .0084, .0005));
-    assert.ok(near(tierChance('rare', 1.8), .192, .002));
-    assert.ok(near(tierChance('epic', 1.8), .072, .002));
+    assert.deepEqual(['common', 'uncommon', 'rare', 'epic', 'legendary'].map(total), [394, 208, 76, 38, 7]);
+    assert.ok(near(tierChance('common', 1), .545, .002));
+    assert.ok(near(tierChance('legendary', 1), .0097, .0005));
+    assert.ok(near(tierChance('rare', 1.8), .154, .002));
+    assert.ok(near(tierChance('epic', 1.8), .077, .002));
+    for (const e of LOOT) for (const s of e.make(() => .5)) {
+      const key = VITEM[s.id]?.key ?? '';
+      assert.ok(!/spawn_egg|potion|^snowball$|^egg$/.test(key), `${e.name} gives ${key}`);
+    }
     assert.equal(LOOT.filter((e) => e.starter).length, 5);
     for (const e of LOOT) assert.ok(e.make(() => .5).length > 0, e.name);
   });

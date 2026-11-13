@@ -18,6 +18,7 @@ import { cooldownScale, attackStats } from './vanilla/combat';
 import { enchLevel, type VStack } from './vanilla/stack';
 import type { MAction } from './vanilla/messages';
 import type { VPlayer } from './vanilla/sim';
+import { BOW, THROWN } from './vanilla/ranged';
 import { LP } from './pillars_rules';
 import { CROWN_Y } from './pillars_geometry';
 import type { PillarsMatch } from './pillars';
@@ -278,7 +279,7 @@ export class PillarsBot {
     };
     const yaw = Math.atan2(-(fb.x - eye.x), -(fb.z - eye.z));
     if (this.drawing >= 0) {
-      const pitch = ballistic(60, 20) ?? .3;
+      const pitch = (ballistic(BOW.speed * 20, 20) ?? .3) - BOW.lift;
       this.turnTo(yaw, pitch, .08);
       if (this.time - this.drawing >= lerp(1.3, 1.02, Math.min(1, this.skill))) {
         this.drawing = -1;
@@ -297,7 +298,8 @@ export class PillarsBot {
     }
     const throwable = inv.findIndex((s, i) => i < 9 && (s?.id === VI.snowball || s?.id === VI.egg || (s?.id === VI.wind_charge && d < 7)));
     if (throwable >= 0 && d > 3 && d < 14 && this.rng() < .5) {
-      const pitch = ballistic(30, 12) ?? .2;
+      const t = THROWN[VITEM[inv[throwable]!.id]?.key ?? ''] ?? THROWN.snowball;
+      const pitch = (ballistic(t.speed * 20, 12) ?? .2) - t.lift;
       this.select(throwable);
       this.turnTo(yaw, pitch, .1);
       this.useAt = this.time + lerp(1.4, .5, Math.min(1, this.skill));
@@ -306,7 +308,8 @@ export class PillarsBot {
     }
     const pearl = inv.findIndex((s, i) => i < 9 && s?.id === VI.ender_pearl);
     if (pearl >= 0 && d > 18 && this.skill > .5 && this.rng() < .3) {
-      const pitch = ballistic(30, 12);
+      const aim = ballistic(THROWN.ender_pearl.speed * 20, 12);
+      const pitch = aim === null ? null : aim - THROWN.ender_pearl.lift;
       if (pitch !== null) {
         this.select(pearl);
         this.turnTo(yaw, pitch, .04);
