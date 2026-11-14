@@ -11,7 +11,7 @@ import type { Atlas } from './textures';
 import { buildAvatarBody, disposeAvatarBody, type AvatarBody } from './avatar';
 import {
   createAvatarItemMaterial, createAvatarEquipment, attachAvatarEquipment,
-  poseAvatar, type AvatarEquipment,
+  poseAvatar, SEAT_DROP, type AvatarEquipment,
 } from './avatar_equipment';
 
 function drawHealthBar(canvas: HTMLCanvasElement, frac: number): void {
@@ -104,6 +104,8 @@ interface Avatar {
   swingT: number;
   sneakT: number;
   /** Elytra flight blend (0 standing … 1 lying along the flight), its climb angle and bank. */
+  /** Seated-in-a-boat blend and rowing phase. */
+  seatT: number; rowPhase: number;
   glideT: number; glideClimb: number; glideRoll: number; lastY: number; lastYaw: number;
   wings: THREE.Group | null;
   aimT: number;
@@ -137,6 +139,8 @@ export class RemotePlayers {
   private hovered = -1;
   maxHealth = 20;
   styleOf: ((id: number) => BodyStyle | null) | null = null;
+  /** Heading of the boat a body at this spot sits in (vanilla modes). */
+  seatYaw: ((x: number, y: number, z: number) => number | null) | null = null;
   private readonly itemMat: THREE.MeshBasicMaterial;
   private readonly flashGeo = new THREE.OctahedronGeometry(0.13, 0);
   private readonly flashMat: THREE.MeshBasicMaterial;
@@ -191,6 +195,7 @@ export class RemotePlayers {
       healthCanvas, healthTex, healthSprite, lastHealth: -1,
       dx: remote.tx, dy: remote.ty, dz: remote.tz, dyaw: remote.tyaw, dpitch: remote.tpitch,
       walkPhase: 0, lastX: remote.tx, lastZ: remote.tz,
+      seatT: 0, rowPhase: 0,
       glideT: 0, glideClimb: 0, glideRoll: 0, lastY: remote.ty, lastYaw: remote.tyaw, wings: null,
       strideSpeed: 0, ex: 0, ey: 0, ez: 0, rawSpeed: 0,
       heldId: 0, equipment: null,
@@ -281,6 +286,14 @@ export class RemotePlayers {
       const vspeed = (av.dy - av.lastY) / Math.max(dt, 1e-4);
       av.lastX = av.dx; av.lastZ = av.dz; av.lastY = av.dy;
       this.poseGlide(av, r.gliding && !av.rat, hspeed, vspeed, dt);
+      av.seatT += ((r.riding && !av.rat ? 1 : 0) - av.seatT) * Math.min(1, dt * 10);
+      let headYaw = 0;
+      if (av.seatT > 0.001) {
+        av.group.position.y -= SEAT_DROP * av.seatT;
+        const hull = r.riding ? this.seatYaw?.(av.dx, av.dy, av.dz) ?? null : null;
+        if (hull !== null) { headYaw = wrap(av.dyaw - hull); av.group.rotation.y = hull; }
+        av.rowPhase += Math.min(hspeed, 8) * dt * 1.6;
+      }
       av.strideSpeed += (Math.min(hspeed, 9) - av.strideSpeed) * Math.min(1, dt * 9);
       const showHealth = id === this.hovered && av.group.visible;
       av.healthSprite.visible = showHealth;
@@ -294,6 +307,7 @@ export class RemotePlayers {
         walkPhase: av.walkPhase, speed: av.strideSpeed * (1 - av.glideT), sneak: av.sneakT * (1 - av.glideT),
         pitch: av.dpitch, attackSwing, aim: av.aimT,
         reload: r.reloading ? Math.sin(av.reloadT * Math.PI) : 0,
+        seated: av.seatT, row: av.rowPhase, headYaw,
       });
     }
   }
@@ -320,7 +334,9 @@ export class RemotePlayers {
     av.group.rotation.z = g * av.glideRoll;
     // Pivot round the chest instead of the feet, so the body stays on its track.
     GLIDE_PIVOT.set(0, 0.9, 0).applyEuler(av.group.rotation);
-    av.group.position.set(av.dx - GLIDE_PIVOT.x, av.dy + 0.9 - GLIDE_PIVOT.y, av.dz - GLIDE_PIVOT.z);
+    // A flyer's position is the bottom of its 0.6-tall box: the chest sits at its middle.
+    const chest = 0.9 - 0.6 * g;
+    av.group.position.set(av.dx - GLIDE_PIVOT.x, av.dy + chest - GLIDE_PIVOT.y, av.dz - GLIDE_PIVOT.z);
     if (!av.wings) av.wings = buildWings(av.group);
     av.wings.visible = true;
     const speed = Math.hypot(hspeed, vspeed);

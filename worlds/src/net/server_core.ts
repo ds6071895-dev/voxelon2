@@ -858,6 +858,7 @@ export class GameServer {
       x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch, health: p.health, dead: p.dead,
       sneaking: p.sneaking, held: p.held, swing: p.swing, aiming: p.aiming, reloading: p.reloading,
       ...(this.engProfiles.get(p.id)?.gliding ? { gliding: true } : {}),
+      ...(this.engProfiles.get(p.id)?.boat !== undefined ? { riding: true } : {}),
     };
   }
 
@@ -2622,6 +2623,7 @@ export class GameServer {
       health: p.health, dead: this.hiddenInWorld(p, w), sneaking: p.sneaking, held: p.held, swing: p.swing,
       aiming: p.aiming, reloading: p.reloading,
       ...(this.engProfiles.get(p.id)?.gliding ? { gliding: true } : {}),
+      ...(this.engProfiles.get(p.id)?.boat !== undefined ? { riding: true } : {}),
     };
   }
 

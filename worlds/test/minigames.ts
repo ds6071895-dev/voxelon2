@@ -75,7 +75,7 @@ export function runMinigamesTests(): number {
 
   t('the selection bag (PartyRulesCheck.selection)', () => {
     const pool: MgEntry[] = MG_GAMES.map((g) => ({ id: g.id, category: g.category }));
-    assert.equal(pool.length, 22);
+    assert.equal(pool.length, 21);
     const rng = mulberry32(42);
     for (const length of MG_LENGTHS) {
       const recent: string[] = [];
@@ -98,8 +98,8 @@ export function runMinigamesTests(): number {
     const recent: string[] = [];
     const seen = new Set<string>();
     for (let match = 0; match < 12; match++) { const p = pick(pool, 3, recent, new Set(), rng); p.forEach((e) => seen.add(e.id)); remember(recent, p); }
-    assert.ok(seen.size >= 22, `every game within 12 three-game matches (saw ${seen.size})`);
-    const banned = new Set(pool.slice(0, 14).map((e) => e.id));
+    assert.ok(seen.size >= 21, `every game within 12 three-game matches (saw ${seen.size})`);
+    const banned = new Set(pool.slice(0, 13).map((e) => e.id));
     const limited = pick(pool, 8, [], banned, rng);
     assert.ok(limited.length === 8 && limited.every((e) => !banned.has(e.id)));
     assert.equal(pick(pool, 3, [], new Set(pool.map((e) => e.id)), rng).length, 0, 'a fully banned pool picks nothing');
@@ -118,8 +118,8 @@ export function runMinigamesTests(): number {
       assert.ok(g.name.length <= 16, g.name);
       per[g.category]++;
     }
-    assert.deepEqual(per, { SURVIVAL: 6, RACE: 8, SCORE: 6, BRAIN: 2 });
-    assert.equal(mgPool().length,22);
+    assert.deepEqual(per, { SURVIVAL: 6, RACE: 7, SCORE: 6, BRAIN: 2 });
+    assert.equal(mgPool().length,21);
   });
 
   t('batch-A scaling (PartyScalingCheck)', () => {

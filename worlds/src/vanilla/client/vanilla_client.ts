@@ -101,6 +101,8 @@ export class VanillaClient {
   private attackAt = 0;
   private lastJump = false;
   private lastSneak = false;
+  /** Heading of the boat a body at this spot sits in (remote riders' pose). */
+  boatYawNear(x: number, y: number, z: number): number | null { return this.ents?.boatYawNear(x, y, z) ?? null; }
   /** The boat entity we sit in, drawn at our own predicted position. */
   private rideEnt: number | null = null;
   private rideSince = 0;

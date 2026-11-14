@@ -370,7 +370,7 @@ function remoteEquipTests(): void {
         yaw: 0, pitch: 0, health: 20, dead: false },
       tx: 0, ty: 0, tz: 0, tyaw: 0, tpitch: 0, seenAt: 0,
       buf: new TransformBuffer(), clock: new SenderClock(), poses: new StateTimeline(),
-      health: 20, dead: false, sneaking: false, gliding: false, held: Block.TeamWoolC,
+      health: 20, dead: false, sneaking: false, gliding: false, riding: false, held: Block.TeamWoolC,
       swing: 0, aiming: false, reloading: false,
     };
     net.remotes.set(1, remote);

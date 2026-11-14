@@ -45,7 +45,7 @@ class PillarsPresenter implements ModePresenter {
       : s.phase === 'main' ? `Deathmatch in ${formatMatchTime(left)}`
         : s.phase === 'deathmatch' ? `Deathmatch · ${formatMatchTime(left)}` : 'Match over';
     const rows: SidebarRow[] = [...s.players].sort((a, b) => Number(b.alive) - Number(a.alive) || b.kills - a.kills).map((p) => ({
-      label: p.name, value: p.alive ? `${p.kills} ${p.kills === 1 ? 'kill' : 'kills'}` : 'out', tone: p.alive ? undefined : 'mute', you: p.id === me,
+      label: p.name, value: p.alive ? `${p.kills} ${p.kills === 1 ? 'kill' : 'kills'}` : 'out', tone: p.alive ? undefined : 'out', you: p.id === me,
     }));
     if (twist && s.phase !== 'countdown') rows.unshift({ label: 'Twist', value: twist.label, tone: 'gold', you: false });
     if (s.lavaY !== null) rows.splice(1, 0, { label: 'Lava', value: `y ${s.lavaY}`, tone: 'bad', you: false });

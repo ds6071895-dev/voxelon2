@@ -73,7 +73,7 @@ class DisasterPresenter implements ModePresenter {
     rows.push({ label: `${s.players.filter((p) => p.alive).length} alive`, value: 'Survived', tone: 'mute', you: false });
     const players = [...s.players].sort((a, b) => Number(b.alive) - Number(a.alive) || b.disasters - a.disasters);
     for (const p of players) rows.push({
-      label: p.name, value: p.alive ? String(p.disasters) : 'out', tone: p.alive ? undefined : 'mute', you: p.id === me,
+      label: p.name, value: p.alive ? String(p.disasters) : 'out', tone: p.alive ? undefined : 'out', you: p.id === me,
     });
     const tone = s.phase === 'finale' ? 'danger' : s.active.length ? 'warn' : 'calm';
     this.c.hud.setSidebar('DISASTER CITY', formatMatchTime(left), next, rows, tone);

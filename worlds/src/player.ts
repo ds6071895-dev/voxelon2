@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { BLOCKS, Block, collisionBoxes, isSolid, type Box } from './blocks';
 import type { PlayerInput } from './input';
 import type { PhysicsWorld } from './physics_world';
-import { BOAT, stepBoat, type BoatBody } from './vanilla/boat';
+import { BOAT, SEAT_DROP, stepBoat, type BoatBody } from './vanilla/boat';
 
 const FULL: Box[] = [[[0, 0, 0], [1, 1, 1]]];
 const NONE: Box[] = [];
@@ -23,6 +23,10 @@ const BASE_HEIGHT = 1.8;
 // Vanilla-style auto-step: walk straight up obstacles whose top is within this
 // height (slabs, single stairs) when there's headroom, without jumping.
 const STEP_HEIGHT = 0.6;
+/** Elytra flight: the body lies along its path in a 0.6-tall box (vanilla's
+ *  fall-flying pose) with the eye near its middle. Fractions of standing. */
+const GLIDE_HEIGHT = 1 / 3;
+const GLIDE_EYE = 0.4 / 1.8;
 const BASE_EYE_STANDING = 1.62;
 const BASE_EYE_SNEAKING = 1.27;
 const MOUSE_SENSITIVITY = 0.0022;
@@ -115,7 +119,8 @@ export class Player {
   boostTicks = 0;
   inLava = false;
   climbing = false;
-  private glideAcc = 0;
+  /** Body scale from setBodyScale; the flying box is a third of its height. */
+  private scale = 1;
   /** Body size (Rat and Seek shrinks rats to half scale). */
   private halfWidth = BASE_HALF_WIDTH;
   private height = BASE_HEIGHT;
@@ -128,9 +133,10 @@ export class Player {
     const s = Math.max(0.2, Math.min(2, scale));
     // Called every frame by the vanilla modes: only a real change resets the eye,
     // or a sneak's eased eye height snaps back up each frame (camera jitter).
-    if (this.height === BASE_HEIGHT * s) return;
+    if (this.scale === s) return;
+    this.scale = s;
     this.halfWidth = BASE_HALF_WIDTH * s;
-    this.height = BASE_HEIGHT * s;
+    this.height = BASE_HEIGHT * s * (this.gliding ? GLIDE_HEIGHT : 1);
     this.eyeStanding = BASE_EYE_STANDING * s;
     this.eyeSneaking = BASE_EYE_SNEAKING * s;
     this.eye = this.eyeStanding;
@@ -235,6 +241,7 @@ export class Player {
     this.climbing = cellKind === 'ladder' || cellKind === 'scaffold';
     if (this.gliding && (this.onGround || this.inWater || this.climbing)) this.gliding = false;
     if (this.gliding) { this.glide(dt, world); return; }
+    if (this.height < BASE_HEIGHT * this.scale - 1e-6) this.standUp(world);
     if (this.boat) { this.rideBoat(dt, input, world); return; }
     // Wish direction in the horizontal plane, relative to yaw.
     let fwd = 0, strafe = 0;
@@ -449,35 +456,60 @@ export class Player {
     this.vel.set(b.vx * 20, b.vy * 20, b.vz * 20);
     this.fallDistance = 0;
     this.inWater = false;
+    // Seated on the bench: the eye drops with the hips (avatar_equipment SEAT_DROP).
+    this.eye += (this.eyeStanding - SEAT_DROP - this.eye) * Math.min(1, 10 * dt);
   }
 
   /** Elytra flight: Java's per-tick glide equations, run in 20 Hz sub-steps.
    *  Velocities are blocks/tick inside, blocks/second outside. */
   private glide(dt: number, world: PhysicsWorld): void {
-    this.glideAcc = Math.min(this.glideAcc + dt, .25);
-    let vx = this.vel.x / 20, vy = this.vel.y / 20, vz = this.vel.z / 20;
-    while (this.glideAcc >= .05) {
-      this.glideAcc -= .05;
-      const cp = Math.cos(this.pitch), lx = -Math.sin(this.yaw) * cp, ly = Math.sin(this.pitch), lz = -Math.cos(this.yaw) * cp;
-      const hlook = Math.hypot(lx, lz), hvel = Math.hypot(vx, vz), sq = cp * cp;
-      vy += -.08 + sq * .06;
-      if (vy < 0 && hlook > 0) { const a = vy * -.1 * sq; vy += a; vx += lx * a / hlook; vz += lz * a / hlook; }
-      if (this.pitch > 0 && hlook > 0) { const a = hvel * Math.sin(this.pitch) * .04; vy += a * 3.2; vx -= lx * a / hlook; vz -= lz * a / hlook; }
-      if (hlook > 0) { vx += (lx / hlook * hvel - vx) * .1; vz += (lz / hlook * hvel - vz) * .1; }
-      if (this.boostTicks > 0) {
-        this.boostTicks--;
-        vx += lx * .1 + (lx * 1.5 - vx) * .5; vy += ly * .1 + (ly * 1.5 - vy) * .5; vz += lz * .1 + (lz * 1.5 - vz) * .5;
-      }
-      vx *= .99; vy *= .98; vz *= .99;
+    // Flying box: keep the body's middle where it was as it lies down.
+    const lying = BASE_HEIGHT * this.scale * GLIDE_HEIGHT;
+    if (this.height > lying + 1e-6) {
+      const lift = (this.height - lying) / 2;
+      this.pos.y += lift; this.eye -= lift; this.height = lying;
     }
+    this.eye += (BASE_HEIGHT * this.scale * GLIDE_EYE - this.eye) * Math.min(1, 10 * dt);
+    // Java's per-tick equations, applied as fractions of a tick every frame so
+    // speed and steering change smoothly instead of in 20 Hz steps.
+    const f = Math.min(dt, .1) / .05;
+    let vx = this.vel.x / 20, vy = this.vel.y / 20, vz = this.vel.z / 20;
+    const cp = Math.cos(this.pitch), lx = -Math.sin(this.yaw) * cp, ly = Math.sin(this.pitch), lz = -Math.cos(this.yaw) * cp;
+    const hlook = Math.hypot(lx, lz), hvel = Math.hypot(vx, vz), sq = cp * cp;
+    vy += (-.08 + sq * .06) * f;
+    if (vy < 0 && hlook > 0) { const a = vy * -.1 * sq * f; vy += a; vx += lx * a / hlook; vz += lz * a / hlook; }
+    if (this.pitch > 0 && hlook > 0) { const a = hvel * Math.sin(this.pitch) * .04 * f; vy += a * 3.2; vx -= lx * a / hlook; vz -= lz * a / hlook; }
+    if (hlook > 0) { const k = 1 - Math.pow(.9, f); vx += (lx / hlook * hvel - vx) * k; vz += (lz / hlook * hvel - vz) * k; }
+    if (this.boostTicks > 0) {
+      const k = 1 - Math.pow(.5, Math.min(f, this.boostTicks)), t = Math.min(f, this.boostTicks);
+      this.boostTicks = Math.max(0, this.boostTicks - f);
+      vx += lx * .1 * t + (lx * 1.5 - vx) * k; vy += ly * .1 * t + (ly * 1.5 - vy) * k; vz += lz * .1 * t + (lz * 1.5 - vz) * k;
+    }
+    vx *= Math.pow(.99, f); vy *= Math.pow(.98, f); vz *= Math.pow(.99, f);
     this.vel.set(vx * 20, vy * 20, vz * 20);
     this.fallDistance = 0;
     this.unstick(world);
     this.onGround = false;
-    this.moveAxis(world, 1, this.vel.y * dt);
-    this.moveHorizontal(world, 0, this.vel.x * dt, false);
-    this.moveHorizontal(world, 2, this.vel.z * dt, false);
-    if (this.onGround) this.gliding = false;
+    // A wall or ceiling stops only the blocked part of the flight: graze an
+    // edge and slide along it instead of grinding into it.
+    const x0 = this.pos.x, y0 = this.pos.y, z0 = this.pos.z;
+    const dx = this.vel.x * dt, dy = this.vel.y * dt, dz = this.vel.z * dt;
+    this.moveAxis(world, 1, dy);
+    this.moveHorizontal(world, 0, dx, false);
+    this.moveHorizontal(world, 2, dz, false);
+    if (Math.abs(this.pos.y - y0 - dy) > 1e-4) this.vel.y = 0;
+    if (Math.abs(this.pos.x - x0 - dx) > 1e-4) this.vel.x = 0;
+    if (Math.abs(this.pos.z - z0 - dz) > 1e-4) this.vel.z = 0;
+    if (this.onGround) { this.gliding = false; this.standUp(world); }
+  }
+
+  /** Back to the standing box after a flight, pushed clear of anything the
+   *  taller body now overlaps. */
+  private standUp(world: PhysicsWorld): void {
+    const y0 = this.pos.y;
+    this.height = BASE_HEIGHT * this.scale;
+    this.unstick(world);
+    this.eye -= this.pos.y - y0;
   }
 
   /** Sneaking on the ground refuses moves that would leave you unsupported. */

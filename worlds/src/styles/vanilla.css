@@ -41,7 +41,8 @@ body.vanilla-active .item-name { bottom: calc(var(--hotbar-slot) + 38px + var(--
 .v-side-row b { font-variant-numeric: tabular-nums; }
 .v-side-row.you span { color: var(--w-ink); }
 .v-side-row.you::before { content: ''; width: 4px; height: 14px; border-radius: 2px; background: #2d6ee0; margin-right: -4px; }
-.v-side-row[data-tone="mute"] span, .v-side-row[data-tone="mute"] b { color: var(--w-ink-mute); text-decoration: line-through; }
+.v-side-row[data-tone="mute"] span, .v-side-row[data-tone="mute"] b, .v-side-row[data-tone="out"] span, .v-side-row[data-tone="out"] b { color: var(--w-ink-mute); }
+.v-side-row[data-tone="out"] span { text-decoration: line-through; }
 .v-side-row[data-tone="gold"] b { color: #b8730c; }
 .v-side-row[data-tone="bad"] b { color: #c0262d; }
 .v-side-row[data-tone="good"] b { color: #1f9d5b; }

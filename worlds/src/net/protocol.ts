@@ -57,6 +57,8 @@ export interface PlayerSnapshot {
   sneaking?: boolean;
   /** Flying on an elytra (vanilla modes): drawn lying along the flight with wings out. */
   gliding?: boolean;
+  /** Sitting in a boat (vanilla modes): drawn seated, the hull is its own entity. */
+  riding?: boolean;
   /** Item id held in hand (0 = empty) — rendered on the avatar's arm. */
   held?: number;
   /** Monotonic 16-bit swing sequence; a change starts the arm-hit animation. */

@@ -33,7 +33,11 @@ interface View extends MobRig {
   /** Driven locally (the boat you're sitting in): server moves are ignored. */
   held?: boolean;
   fly?: Flight;
+  /** A boat's two oar pivots (port, starboard), its stroke phase and last drawn spot. */
+  oars?: THREE.Object3D[]; row?: number; last?: THREE.Vector3;
 }
+
+const WATER_MASK = new THREE.MeshBasicMaterial({ colorWrite: false, side: THREE.DoubleSide });
 
 /** How long a killed mob lies on its side before it vanishes (seconds). */
 const DEATH_S = .9;
@@ -90,6 +94,16 @@ export class EntityView3D {
     v.yaw = at.yaw; v.group.rotation.y = at.yaw;
   }
 
+  /** Heading of the boat a body at (x, y, z) is sitting in, or null. */
+  boatYawNear(x: number, y: number, z: number): number | null {
+    for (const v of this.views.values()) {
+      if (v.kind !== 'boat') continue;
+      const q = v.group.position;
+      if (Math.abs(q.x - x) < .9 && Math.abs(q.z - z) < .9 && Math.abs(q.y - y) < .9) return v.group.rotation.y;
+    }
+    return null;
+  }
+
   /** Where a lead ties onto an entity (a sheep's neck), in world space. */
   tiePoint(id: number, out: THREE.Vector3): THREE.Vector3 | null {
     const v = this.views.get(id);
@@ -142,6 +156,19 @@ export class EntityView3D {
       } else if (v.kind === 'arrow' || v.kind === 'spectral_arrow' || v.kind === 'trident' || v.kind === 'firework') {
         const dir = v.target.clone().sub(v.prev);
         if (dir.lengthSq() > 1e-5) v.group.lookAt(v.group.position.clone().add(dir));
+      } else if (v.kind === 'boat' && v.oars) {
+        // Oars pull while the hull moves and rest trailing when it's still.
+        const last = v.last ??= v.group.position.clone();
+        const speed = Math.hypot(v.group.position.x - last.x, v.group.position.z - last.z) / Math.max(dt, 1e-3);
+        last.copy(v.group.position);
+        const pull = Math.min(1, speed / 2);
+        v.row = (v.row ?? 0) + dt * (2 + speed * 1.4) * (pull > .05 ? 1 : 0);
+        const s = Math.sin(v.row), c = Math.cos(v.row);
+        v.oars.forEach((o, i) => {
+          const side = i === 0 ? 1 : -1;
+          o.rotation.y = side * (pull * s * .55 + (1 - pull) * .45);
+          o.rotation.z = side * (.32 + pull * c * .14);
+        });
       } else if (v.kind === 'end_crystal') {
         v.group.children[0].rotation.y += dt * 1.8; v.group.children[0].rotation.x += dt * 1.1;
         v.group.children[0].position.y = 1 + Math.sin(v.age * 2) * .2;
@@ -343,13 +370,67 @@ export class EntityView3D {
         buildMob(v, e);
         return;
       case 'boat': {
-        // An open oak hull, long along its heading (−z), with a bench and paddles.
-        const wood = 0x9c7445, dark = 0x7a5a34;
-        tinted(box(g, 1.0, .1, 1.5, dark, 0, .08, 0));
-        for (const x of [-.5, .5]) tinted(box(g, .1, .36, 1.5, wood, x, .3, 0));
-        for (const z of [-.75, .75]) tinted(box(g, 1.1, .36, .1, wood, 0, .3, z));
-        tinted(box(g, .9, .06, .26, dark, 0, .3, .2));
-        for (const x of [-.62, .62]) tinted(box(g, .06, .06, 1.0, 0x6b4a2a, x, .46, .05));
+        // An open oak rowing boat, bow along its heading (−z): planked sides
+        // that flare out, a pointed bow, a flat stern board, gunwale caps, a
+        // bench to sit on and an oar in each rowlock.
+        const oak = [0x5e4427, 0x7a5a34, 0x94703f, 0xa98049, 0xc29a62];
+        const own = (m: THREE.Mesh) => { m.userData.ownGeo = true; return tinted(m); };
+        const part = (parent: THREE.Object3D, w: number, h: number, d: number, c: number, x: number, y: number, z: number, rx = 0, ry = 0, rz = 0) => {
+          const m = own(box(parent, w, h, d, c, x, y, z)); m.rotation.set(rx, ry, rz); return m;
+        };
+        const L = 1.6, W = .62, BOW = -L / 2;
+        // Floor: two boards and the bow's narrower boards.
+        part(g, W * 2 - .1, .08, L, oak[1], 0, .04, .05);
+        for (const x of [-.27, .27]) part(g, .04, .085, L - .1, oak[0], x, .045, .05);
+        // The bow's floor: one triangle out to the stem (shape x, −z).
+        const bowShape = new THREE.Shape([new THREE.Vector2(-W, -BOW - .1), new THREE.Vector2(W, -BOW - .1), new THREE.Vector2(0, -BOW + .42)]);
+        const flat = (y: number, mat: THREE.Material) => {
+          const m = new THREE.Mesh(new THREE.ShapeGeometry(bowShape), mat);
+          m.rotation.x = -Math.PI / 2; m.position.y = y; m.userData.ownGeo = true; g.add(m); return m;
+        };
+        const bowFloor = tinted(flat(.081, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })));
+        const fc = new THREE.Color(oak[1]), n = bowFloor.geometry.getAttribute('position').count;
+        bowFloor.geometry.setAttribute('color', new THREE.Float32BufferAttribute(Array.from({ length: n }, () => [fc.r, fc.g, fc.b]).flat(), 3));
+        // Sides: two strakes each, the upper one flared outward.
+        for (const sx of [-1, 1]) {
+          part(g, .08, .2, L, oak[2], sx * W, .17, .05, 0, 0, sx * -.06);
+          part(g, .08, .2, L, oak[3], sx * (W + .03), .36, .05, 0, 0, sx * -.16);
+          part(g, .14, .05, L + .02, oak[4], sx * (W + .06), .48, .05);
+          // Bow boards angle in to meet at the stem.
+          part(g, .08, .42, .8, oak[2], sx * .31, .27, BOW - .18, 0, sx * .95, 0);
+          part(g, .13, .05, .82, oak[4], sx * .34, .5, BOW - .18, 0, sx * .95, 0);
+          // Ribs inside the hull.
+          for (const z of [-.45, .25]) part(g, .06, .32, .06, oak[0], sx * (W - .07), .24, z);
+        }
+        part(g, .09, .5, .09, oak[1], 0, .29, BOW - .43);
+        // Stern board and its cap.
+        part(g, W * 2 + .1, .42, .09, oak[2], 0, .27, L / 2 + .05);
+        part(g, W * 2 + .2, .05, .16, oak[4], 0, .5, L / 2 + .05);
+        // Bench under the rider's hips, on two cleats.
+        part(g, W * 2 - .06, .07, .32, oak[3], 0, .27, .2);
+        for (const sx of [-1, 1]) part(g, .06, .06, .3, oak[0], sx * (W - .1), .21, .2);
+        // Keeps the lake's surface out of the hull: depth only, drawn after the
+        // opaque hull and before the (transparent) water.
+        flat(.25, WATER_MASK).renderOrder = 10;
+        g.children[g.children.length - 1].userData.tint = false;
+        for (const [w, d, z] of [[W * 2 - .06, L - .04, .05]] as const) {
+          const mask = new THREE.Mesh(new THREE.PlaneGeometry(w, d), WATER_MASK);
+          mask.rotation.x = -Math.PI / 2; mask.position.set(0, .25, z); mask.renderOrder = 10;
+          mask.userData.ownGeo = true; mask.userData.tint = false;
+          g.add(mask);
+        }
+        // Oars in rowlocks on the gunwales: shaft out over the water, blade down.
+        v.oars = [];
+        for (const sx of [-1, 1]) {
+          part(g, .08, .1, .1, 0x3c3f44, sx * (W + .07), .55, -.05);
+          const pivot = new THREE.Group();
+          pivot.position.set(sx * (W + .07), .56, -.05);
+          g.add(pivot);
+          part(pivot, 1.25, .05, .05, oak[3], sx * .32, 0, 0);
+          part(pivot, .26, .07, .07, oak[1], sx * -.38, 0, 0);
+          part(pivot, .36, .025, .2, oak[4], sx * .96, 0, 0);
+          v.oars.push(pivot);
+        }
         return;
       }
       case 'minecart': {

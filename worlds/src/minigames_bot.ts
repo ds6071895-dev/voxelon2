@@ -13,7 +13,6 @@ import { Player } from './player';
 import { FROZEN_INPUT, type PlayerInput } from './input';
 import { findPath } from './vanilla/mobs';
 import { VMETA } from './vanilla/blocks';
-import { VI } from './vanilla/items';
 import type { MAction } from './vanilla/messages';
 import type { MinigamesMatch } from './minigames';
 import { BASE_Y } from './minigames/arena';
@@ -26,7 +25,6 @@ import { step } from './vanilla/deco';
 import { RooftopTag } from './minigames/rooftop';
 import { CoinCanopy } from './minigames/canopy';
 import { BoatRush } from './minigames/boat';
-import { ElytraRally } from './minigames/glide';
 import { RedLight } from './minigames/red_light';
 import { ParkourRace } from './minigames/parkour_race';
 import { Pad, JumpModel } from './minigames/parkour';
@@ -123,7 +121,6 @@ export class MgBot {
       else if (g instanceof RooftopTag) this.rooftop(g,actions);
       else if (g instanceof CoinCanopy) this.canopy(g);
       else if (g instanceof BoatRush) this.boatRace(g);
-      else if (g instanceof ElytraRally) this.glideRace(g,actions);
       else if (g instanceof RedLight) this.redLight(g);
       else if (g instanceof ParkourRace) this.parkour(g);
       else if (g instanceof HedgeMaze) this.maze(g,actions);
@@ -557,20 +554,6 @@ export class MgBot {
     const ahead=line[(nearest+50)%line.length],bend=Math.abs(angleTo(yaw,Math.atan2(-(ahead[0]-target[0]),-(ahead[1]-target[1]))));
     const desired=lerp(9,18,this.s)/(1+bend*2);
     this.input.forward=speed<desired&&Math.abs(error)<1.2;this.input.back=speed>desired+1.5;
-  }
-  private glideRace(g:ElytraRally,actions:(()=>void)[]):void{
-    const i=g.nextRing.get(this.id)??0,r=g.course.rings[Math.min(i,g.course.rings.length-1)],p=this.body.pos;
-    const dx=r.x-p.x,dy=BASE_Y+r.y+.5-p.y,dz=r.z-p.z,d=Math.hypot(dx,dz),side=(p.x-r.x)*r.nx+(p.y-BASE_Y-r.y-.9)*r.ny+(p.z-r.z)*r.nz;
-    // Aim through the current ring; a missed plane must be approached again from behind.
-    let tx=r.x+r.nx*8,tz=r.z+r.nz*8;
-    if(side>1){tx=r.x-r.nx*12;tz=r.z-r.nz*12;}
-    const yaw=Math.atan2(-(tx-p.x),-(tz-p.z)),pitch=clamp(Math.atan2(dy,d)*.7+.05,-.45,.45);
-    this.turn(yaw,pitch,lerp(2.5,5,this.s));
-    if(!this.body.gliding&&p.y>BASE_Y+10&&this.ready()){actions.push(()=>this.act({k:'glide',on:true}));this.wait(.4);}
-    if(this.body.gliding&&this.ready()){
-      const vp=this.match.sim.players.get(this.id)!,rocket=vp.inv.slots[0];
-      if(rocket?.id===VI.firework_rocket&&(this.body.vel.length()<17||dy>2)&&Math.abs(angleTo(this.body.yaw,yaw))<.35){actions.push(()=>{this.act({k:'select',slot:0});this.act({k:'use',slot:0,yaw:this.body.yaw,pitch:this.pitch});this.body.boostTicks=25;});this.wait(lerp(2,1,this.s));}
-    }
   }
 
 }

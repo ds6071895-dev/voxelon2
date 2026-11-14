@@ -116,7 +116,15 @@ export interface AvatarPoseState {
   reload?: number;
   kick?: number;
   bowPower?: number;
+  /** Sitting blend, 0..1 (in a boat): legs out in front, hands on the oars. */
+  seated?: number;
+  /** Rowing stroke phase (radians) while seated. */
+  row?: number;
+  /** Head turn relative to the body (a seated rider looking about). */
+  headYaw?: number;
 }
+
+export { SEAT_DROP } from './vanilla/boat';
 
 /** Compose the same base pose and equipment overrides for local/remote bodies. */
 export function poseAvatar(
@@ -125,6 +133,7 @@ export function poseAvatar(
   releaseGunHold(body);
   applyAvatarSneak(body, state.sneak);
   body.head.rotation.x = THREE.MathUtils.clamp(state.pitch, -1.15, 1.15) + state.sneak * 0.12;
+  body.head.rotation.y = THREE.MathUtils.clamp(state.headYaw ?? 0, -1.7, 1.7);
   const pose = stridePose(state.walkPhase, state.speed, state.sneak, !!equipment, state.attackSwing);
   body.parts[0].rotation.x = pose.legs[0];
   body.parts[1].rotation.x = pose.legs[1];
@@ -132,6 +141,21 @@ export function poseAvatar(
   body.parts[2].rotation.z = 0;
   body.parts[3].rotation.x = pose.arms[1];
   body.parts[3].rotation.z = pose.rightArmRoll;
+  const seat = state.seated ?? 0;
+  if (seat > 0.001) {
+    // Legs straight out, knees a touch apart; bare hands work the oars.
+    const stroke = Math.sin(state.row ?? 0);
+    body.parts[0].rotation.x += (1.42 - body.parts[0].rotation.x) * seat;
+    body.parts[1].rotation.x += (1.42 - body.parts[1].rotation.x) * seat;
+    body.parts[0].rotation.z = -0.12 * seat; body.parts[1].rotation.z = 0.12 * seat;
+    const oar = 0.75 + stroke * 0.32;
+    body.parts[2].rotation.x += (oar - body.parts[2].rotation.x) * seat;
+    body.parts[2].rotation.z = -0.28 * seat;
+    if (!equipment) {
+      body.parts[3].rotation.x += (oar - body.parts[3].rotation.x) * seat;
+      body.parts[3].rotation.z = 0.28 * seat;
+    }
+  } else { body.parts[0].rotation.z = 0; body.parts[1].rotation.z = 0; }
   if (equipment?.kind === 'gun') {
     poseGunHold(body, equipment.root, {
       pitch: state.pitch, aim: state.aim ?? 0, reload: state.reload ?? 0,

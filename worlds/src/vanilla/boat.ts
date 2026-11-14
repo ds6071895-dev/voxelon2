@@ -20,6 +20,9 @@ export const BOAT = {
   DRAFT: .2,
 } as const;
 
+/** How far a rider's body sits below standing height, hips on the bench. */
+export const SEAT_DROP = 0.42;
+
 /** Top surface of a water column at (x, z) around height y, or null when the
  *  hull isn't touching water. */
 export function waterSurface(get: BlockAt, x: number, y: number, z: number): number | null {

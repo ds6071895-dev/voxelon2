@@ -264,7 +264,7 @@ const SPRITES: [string, string, number[]][] = [
   ['clock', 'compass', [0x8a6a20, 0xc89a30, 0x3a3e44, 0xf0f0e0]],
   ['lead', 'string', [0x6a4a20, 0x9a7034, 0xc89a50]],
   ['oak_boat', 'boat', OAK.slice(1)],
-  ['minecart', 'boat', [0x3a3e44, 0x5a5e64, 0x7a7e84, 0x9a9ea4]],
+  ['minecart', 'minecart', [0x3a3e44, 0x5a5e64, 0x7a7e84, 0x9a9ea4]],
   ['lime_dye', 'dye', [0x4f9a1c, 0x70c42f, 0x9be056, 0xc8f090]],
   ['ghast_tear', 'tear', [0x9cc8d8, 0xc0e0ec, 0xe0f2f8, 0xffffff]],
   ['magma_cream', 'ball', [0x6a3a10, 0xc06a20, 0xf0a030, 0xffe070]],

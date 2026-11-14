@@ -23,7 +23,7 @@ function icon(ctx: CanvasRenderingContext2D, x: number, y: number, mask: string[
   }
 }
 
-export interface SidebarRow { label: string; value: string; tone?: 'good' | 'bad' | 'mute' | 'gold'; you?: boolean }
+export interface SidebarRow { label: string; value: string; tone?: 'good' | 'bad' | 'mute' | 'out' | 'gold'; you?: boolean }
 
 export class VanillaHud {
   readonly root: HTMLElement;

@@ -29,7 +29,6 @@ import { SheepHerd } from './sheep';
 import { RooftopTag } from './rooftop';
 import { CoinCanopy } from './canopy';
 import { BoatRush } from './boat';
-import { ElytraRally } from './glide';
 import { HedgeMaze } from './maze';
 import { LavaClimb } from './lava';
 import { RedLight } from './red_light';
@@ -46,7 +45,7 @@ const ARENAS: Record<string, ArenaDef> = {
 };
 const FACTORIES: Record<string, (course: number) => Minigame> = {
   spleef: () => new GlacierSpleef(), disco: () => new DiscoDash(), anvil: () => new AnvilPanic(), tnt_run: () => new TntRun(), bow_spleef: () => new BowSpleef(), minecarts: () => new MusicalMinecarts(),
-  koth:()=>new KingOfTheHill(),sheep:()=>new SheepHerd(),rooftop_tag:seed=>new RooftopTag(seed),canopy:seed=>new CoinCanopy(seed),boat_race:seed=>new BoatRush(seed),glide:seed=>new ElytraRally(seed),
+  koth:()=>new KingOfTheHill(),sheep:()=>new SheepHerd(),rooftop_tag:seed=>new RooftopTag(seed),canopy:seed=>new CoinCanopy(seed),boat_race:seed=>new BoatRush(seed),
   maze: seed => new HedgeMaze(seed), lava_climb: seed => new LavaClimb(seed),
   red_light: () => new RedLight(), crumble: seed => new CrumblingRuins(seed), blink: seed => new NeonBlink(seed), lunar: seed => new LunarLeap(seed),
   whack: () => new WhackAMole(), memory: () => new MemoryMosaic(),

@@ -38,7 +38,7 @@ import { Particles } from './particles';
 import { Player } from './player';
 import { RemotePlayers } from './remoteplayers';
 import { buildAvatarBody, disposeAvatarBody, type AvatarBody } from './avatar';
-import { createAvatarItemMaterial, createAvatarEquipment, attachAvatarEquipment, poseAvatar, type AvatarEquipment } from './avatar_equipment';
+import { createAvatarItemMaterial, createAvatarEquipment, attachAvatarEquipment, poseAvatar, SEAT_DROP, type AvatarEquipment } from './avatar_equipment';
 import { hitFlavor, type HitFlavor } from './pvp_feedback';
 import { Projectiles } from './projectiles';
 import { Sky } from './sky';
@@ -270,6 +270,7 @@ const vClient = new VanillaClient({
   setStyle: (f) => { remotePlayers.styleOf = f; },
   remotePos: (id) => { const r = net.remotes.get(id); if (!r) return null; const b = remotePlayers.renderedPos(id); return b ? { x: b.x, y: b.y, z: b.z } : { x: r.tx, y: r.ty, z: r.tz }; },
 });
+remotePlayers.seatYaw = (x, y, z) => vClient.boatYawNear(x, y, z);
 /** Vanilla sound names to Worlds' audio. */
 function vanillaSound(name: string, at?: THREE.Vector3, pitch?: number): void {
   switch (name) {
@@ -1818,8 +1819,21 @@ function updateSelfAvatar(dt: number): void {
   if (!selfBody) { selfBody = buildAvatarBody({ ...myCosmetics }); scene.add(selfBody.group); }
   const b = selfBody;
   b.group.visible = true;
-  b.group.position.set(player.pos.x, player.pos.y, player.pos.z);
-  b.group.rotation.y = player.yaw;
+  // In a boat the body sits on the bench facing the bow; only the head follows the look.
+  selfSeatT += ((player.boat ? 1 : 0) - selfSeatT) * Math.min(1, 10 * dt);
+  b.group.position.set(player.pos.x, player.pos.y - SEAT_DROP * selfSeatT, player.pos.z);
+  b.group.rotation.y = player.boat ? player.boat.yaw : player.yaw;
+  // Elytra: lie along the flight, pivoting round the chest at the box's middle.
+  selfGlideT += ((player.gliding ? 1 : 0) - selfGlideT) * Math.min(1, dt * 7);
+  b.group.rotation.order = 'YXZ';
+  if (selfGlideT > 0.01) {
+    const climb = Math.max(-1.25, Math.min(1.1, Math.atan2(player.vel.y, Math.max(Math.hypot(player.vel.x, player.vel.z), 0.5))));
+    b.group.rotation.x = selfGlideT * (climb - Math.PI / 2);
+    b.group.rotation.z = selfGlideT * glideBank;
+    const pivot = new THREE.Vector3(0, 0.9, 0).applyEuler(b.group.rotation);
+    b.group.position.set(player.pos.x - pivot.x, player.pos.y + 0.9 - 0.6 * selfGlideT - pivot.y, player.pos.z - pivot.z);
+  } else { b.group.rotation.x = 0; b.group.rotation.z = 0; }
+  if (player.boat) selfRowPhase += Math.min(Math.hypot(player.vel.x, player.vel.z), 8) * dt * 1.6;
   const heldId = inventory.selectedStack?.id ?? 0;
   if (heldId !== selfHeldId) {
     selfHeldId = heldId;
@@ -1833,12 +1847,14 @@ function updateSelfAvatar(dt: number): void {
   selfWalkPhase += Math.min(hspeed, 7) * dt * 2.4;
   const reloadProgress = reloadTimer > 0 && reloadDuration > 0 ? 1 - reloadTimer / reloadDuration : -1;
   poseAvatar(b, selfEquipment, {
-    walkPhase: selfWalkPhase, speed: hspeed, sneak: selfSneakT, pitch: player.pitch,
+    walkPhase: selfWalkPhase, speed: hspeed * (1 - selfGlideT), sneak: selfSneakT * (1 - selfGlideT), pitch: player.pitch,
     attackSwing: held.swingAmount(), aim: aimZoom > 1 ? 1 : 0,
     reload: reloadProgress >= 0 ? Math.sin(reloadProgress * Math.PI) : 0, kick: held.recoilAmount(),
-    bowPower: 0,
+    bowPower: 0, seated: selfSeatT, row: selfRowPhase,
+    headYaw: player.boat ? wrapAngle(player.yaw - player.boat.yaw) : 0,
   });
 }
+let selfSeatT = 0, selfRowPhase = 0, selfGlideT = 0;
 
 function updateAtmosphere(activeCamera: THREE.Camera): void {
   world.applySky(sky);
