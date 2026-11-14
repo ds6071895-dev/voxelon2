@@ -236,7 +236,7 @@ export class Player {
     this.inLava = fluid?.kind === 'lava';
     if (this.inLava) this.inWater = true; // lava swims like very thick water
     const mk = this.moveKindAt;
-    const cellKind = mk ? (mk(this.pos.x, this.pos.y + .2, this.pos.z) ?? mk(this.pos.x, this.pos.y + 1, this.pos.z)) : undefined;
+    const cellKind = mk ? (mk(this.pos.x, this.pos.y + .2, this.pos.z) ?? mk(this.pos.x, this.pos.y + 1, this.pos.z) ?? mk(this.pos.x, this.pos.y + .02, this.pos.z)) : undefined;
     const underKind = mk ? mk(this.pos.x, this.pos.y - .05, this.pos.z) : undefined;
     this.climbing = cellKind === 'ladder' || cellKind === 'scaffold';
     if (this.gliding && (this.onGround || this.inWater || this.climbing)) this.gliding = false;

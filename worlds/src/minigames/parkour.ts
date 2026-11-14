@@ -7,20 +7,20 @@ export class Pad {
   covers(x:number,z:number){return x>=this.x&&x<=this.x1()&&z>=this.z&&z<=this.z1();}
 }
 export class JumpModel {
-  static readonly NORMAL=new JumpModel(.42,.08,.08);
-  static readonly MOON=new JumpModel(.62,.08,.01);
+  // Calibrated to Player.ts physics (GRAVITY=32, JUMP_VELOCITY=sqrt(80), SPRINT_SPEED=5.612).
+  static readonly NORMAL=new JumpModel(5.612,Math.sqrt(80),32,32);
+  static readonly MOON=new JumpModel(5.612,Math.sqrt(80)*.62/.42,32,4);
   readonly distance:number[]=[];readonly height:number[]=[];private apex=0;
-  constructor(impulse:number,gravityUp:number,gravityDown:number){
-    let v=.4806,vy=impulse,x=v,y=vy;v*=.546;vy=(vy-(vy>0?gravityUp:gravityDown))*.98;
-    this.distance[0]=x;this.height[0]=y;
-    for(let t=1;t<160;t++){x+=v+.026;v=(v+.026)*.91;y+=vy;vy=(vy-(vy>0?gravityUp:gravityDown))*.98;this.distance[t]=x;this.height[t]=y;if(y>this.height[this.apex])this.apex=t;}
+  constructor(vx:number,vy0:number,gravityUp:number,gravityDown:number){
+    const dt=1/60;let x=0,y=0,vy=vy0;
+    for(let t=0;t<400;t++){vy-=(vy>=0?gravityUp:gravityDown)*dt;x+=vx*dt;y+=vy*dt;this.distance[t]=x;this.height[t]=y;if(y>this.height[this.apex])this.apex=t;if(y<-15&&vy<0)break;}
   }
   apexHeight(){return this.height[this.apex];}
-  maxRise(){return Math.floor(this.apexHeight()-.2);}
+  maxRise(){return Math.floor(this.apexHeight()-.15);}
   maxTravel(dy:number){
-    if(this.apexHeight()<dy+.15)return 0;
-    for(let t=this.apex+1;t<160;t++)if(this.height[t]<=dy){const f=(this.height[t-1]-dy)/(this.height[t-1]-this.height[t]);return this.distance[t-1]+(this.distance[t]-this.distance[t-1])*f;}
-    return this.distance[159];
+    if(this.apexHeight()<dy+.1)return 0;
+    for(let t=this.apex+1;t<this.distance.length;t++)if(this.height[t]<=dy){const f=(this.height[t-1]-dy)/(this.height[t-1]-this.height[t]);return this.distance[t-1]+(this.distance[t]-this.distance[t-1])*f;}
+    return this.distance[this.distance.length-1];
   }
   difficulty(from:Pad,to:Pad){const gap=(a:number,b:number,c:number,d:number)=>Math.max(0,c-b-1,a-d-1);const gx=Math.max(0,gap(from.x,from.x1(),to.x,to.x1())-.6),gz=Math.max(0,gap(from.z,from.z1(),to.z,to.z1())-.6),max=this.maxTravel(to.y-from.y);return max<=0?9:Math.hypot(gx,gz)/max;}
   possible(from:Pad,to:Pad,limit:number){return !(to.x<=from.x1()&&from.x<=to.x1()&&to.z<=from.z1()&&from.z<=to.z1())&&to.y-from.y<=this.maxRise()&&this.difficulty(from,to)<=limit;}
@@ -40,7 +40,7 @@ export function walk(r:JavaRandom,from:Pad,waypoints:number[][],goal:Pad,spec:Pa
     let next:Pad|null=null;
     for(let attempt=0;attempt<70&&!next;attempt++){
       const size=spec.sizes[r.nextInt(spec.sizes.length)];let w=size,d=size;
-      if(size===2&&r.nextInt(3)===0){if(r.nextBoolean())w=1;else d=1;}
+      if(size===2&&spec.sizes.includes(1)&&r.nextInt(3)===0){if(r.nextBoolean())w=1;else d=1;}
       const dy=Math.max(-spec.maxDrop,Math.min(spec.model.maxRise(),Math.round(wantDy+r.nextGaussian()*.7))),max=spec.model.maxTravel(dy);if(max<=0)continue;
       const travel=(spec.easiest+r.nextDouble()*(spec.hardest-spec.easiest))*max,angle=heading+r.nextGaussian()*spec.wander*(attempt<30?1:1.6),reach=travel+.6+(Math.max(current.w,current.d)+Math.max(w,d))/2;
       const candidate=new Pad(Math.round(current.cx()+Math.cos(angle)*reach-w/2),current.y+dy,Math.round(current.cz()+Math.sin(angle)*reach-d/2),w,d);

@@ -19,6 +19,11 @@ import { BoatRush, BOAT_LAPS } from '../src/minigames/boat';
 import { WhackAMole } from '../src/minigames/whack';
 import { TreasureCove, HALF, DEPTH } from '../src/minigames/treasure';
 import { generate } from '../src/minigames/brain';
+import { CrumblingRuins } from '../src/minigames/crumble';
+import { NeonBlink } from '../src/minigames/neon';
+import { LunarLeap } from '../src/minigames/lunar';
+import { lavaRoutes } from '../src/minigames/lava_routes';
+import { JumpModel, Pad } from '../src/minigames/parkour';
 import '../src/net/engine_modes';
 
 export function runMinigamesTests(): number {
@@ -150,6 +155,74 @@ export function runMinigamesTests(): number {
       assert.equal(q.options.length, 4);
       assert.equal(new Set(q.options).size, 4, q.prompt);
       assert.ok(q.answer >= 0 && q.answer < 4);
+    }
+  });
+
+  t('parkour courses remain comfortably beatable under player physics', () => {
+    const walkNormal = new JumpModel(4.317, Math.sqrt(80), 32, 32);
+    const walkMoon = new JumpModel(4.317, Math.sqrt(80) * .62 / .42, 32, 4);
+    const edgePad = (s: { x: number; y: number; z: number; r: number }, toward: Pad) => {
+      const a = Math.atan2(toward.cz() - s.z - .5, toward.cx() - s.x - .5), r = Math.max(0, s.r - 1.5);
+      return new Pad(Math.round(s.x + Math.cos(a) * r) - 1, s.y, Math.round(s.z + Math.sin(a) * r) - 1, 3, 3);
+    };
+    const gap = (a: Pad, b: Pad) => ({
+      gx: Math.max(0, a.x > b.x + b.w - 1 ? a.x - (b.x + b.w - 1) - 1 : b.x > a.x + a.w - 1 ? b.x - (a.x + a.w - 1) - 1 : 0),
+      gz: Math.max(0, a.z > b.z + b.d - 1 ? a.z - (b.z + b.d - 1) - 1 : b.z > a.z + a.d - 1 ? b.z - (a.z + a.d - 1) - 1 : 0),
+    });
+
+    const races = [
+      { id: 'crumble', make: (s: number) => new CrumblingRuins(s), sprint: JumpModel.NORMAL, walk: walkNormal, minSize: 2 },
+      { id: 'blink', make: (s: number) => new NeonBlink(s), sprint: JumpModel.NORMAL, walk: walkNormal, minSize: 2 },
+      { id: 'lunar', make: (s: number) => new LunarLeap(s), sprint: JumpModel.MOON, walk: walkMoon, minSize: 3 },
+    ];
+    for (const spec of races) {
+      for (let seed = 0; seed < 25; seed++) {
+        const g = spec.make(seed);
+        for (const pad of g.pads) {
+          assert.ok(pad.w >= spec.minSize && pad.d >= spec.minSize, `${spec.id} seed ${seed}: pad too small (${pad.w}x${pad.d})`);
+        }
+        for (let k = 0; k < g.stops.length - 1; k++) {
+          const fromStop = g.stops[k], toStop = g.stops[k + 1];
+          const nodes = [new Pad(fromStop.x - 1, fromStop.y, fromStop.z - 1, 3, 3), ...(g.legs[k] ?? []), new Pad(toStop.x - 1, toStop.y, toStop.z - 1, 3, 3)];
+          const goal = nodes.length - 1, queue = [0], seen = new Set([0]);
+          for (let q = 0; q < queue.length && !seen.has(goal); q++) {
+            const u = queue[q];
+            for (let j = 1; j < nodes.length; j++) {
+              if (seen.has(j)) continue;
+              const from = u === 0 ? edgePad(fromStop, nodes[j]) : nodes[u];
+              const to = j === goal ? edgePad(toStop, nodes[u]) : nodes[j];
+              if (spec.sprint.possible(from, to, .6) && spec.walk.possible(from, to, .78)) { seen.add(j); queue.push(j); }
+            }
+          }
+          assert.ok(seen.has(goal), `${spec.id} seed ${seed} leg ${k}: unreachable within comfortable walk/sprint margin`);
+        }
+      }
+    }
+
+    const summitBlocks: Pad[] = [];
+    for (let sx = -5; sx <= 5; sx++) for (let sz = -5; sz <= 5; sz++) if (sx * sx + sz * sz <= 25) summitBlocks.push(new Pad(sx, 44, sz, 1, 1));
+    for (let seed = 0; seed < 25; seed++) {
+      const layout = lavaRoutes(seed);
+      assert.equal(layout.routes.length, 3, `lava_climb seed ${seed}: three routes`);
+      for (let r = 0; r < layout.routes.length; r++) {
+        const route = layout.routes[r];
+        for (let i = 0; i < route.length; i++) {
+          const a = route[i];
+          if (i + 1 < route.length) {
+            const b = route[i + 1];
+            if (a.ladderFoot && b.y > a.y) continue;
+            const { gx, gz } = gap(a, b);
+            assert.ok(gx <= 2 && gz <= 2, `lava_climb seed ${seed} route ${r} step ${i}: gap ${gx}x${gz} > 2`);
+            assert.ok(JumpModel.NORMAL.possible(a, b, .67), `lava_climb seed ${seed} route ${r} step ${i}: sprint limit exceeded`);
+            assert.ok(walkNormal.possible(a, b, .9), `lava_climb seed ${seed} route ${r} step ${i}: walk limit exceeded`);
+          } else {
+            assert.ok(summitBlocks.some((b) => {
+              const { gx, gz } = gap(a, b);
+              return gx <= 2 && gz <= 2 && JumpModel.NORMAL.possible(a, b, .67) && walkNormal.possible(a, b, .9);
+            }), `lava_climb seed ${seed} route ${r}: final jump to summit exceeds comfortable limits`);
+          }
+        }
+      }
     }
   });
 

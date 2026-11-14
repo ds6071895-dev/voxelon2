@@ -434,20 +434,31 @@ export class MgBot {
   private parkour(g:ParkourRace):void {
     const b=this.body,p=b.pos,stop=g.reached.get(this.id)??0;
     if(stop>=g.stops.length-1)return;
-    const currentStop=g.stops[stop],nextStop=g.stops[stop+1],model=g instanceof LunarLeap?JumpModel.MOON:JumpModel.NORMAL;
-    const stopPad=(s:typeof currentStop)=>{const h=Math.max(0,Math.floor(s.r/Math.SQRT2-.2));return new Pad(s.x-h,s.y,s.z-h,h*2+1,h*2+1);};
+    const currentStop=g.stops[stop],nextStop=g.stops[stop+1],model=g instanceof LunarLeap?JumpModel.MOON:JumpModel.NORMAL,limit=.64;
+    const edgePad=(s:typeof currentStop,toward:Pad)=>{const a=Math.atan2(toward.cz()-s.z-.5,toward.cx()-s.x-.5),r=Math.max(0,s.r-1.5);return new Pad(Math.round(s.x+Math.cos(a)*r)-1,s.y,Math.round(s.z+Math.sin(a)*r)-1,3,3);};
+    const goalPad=new Pad(nextStop.x-1,nextStop.y,nextStop.z-1,3,3);
     let route=this.mem.route as Pad[]|undefined;
     if(!route||this.mem.stop!==stop||Math.hypot(p.x-Number(this.mem.lastX??p.x),p.z-Number(this.mem.lastZ??p.z))>5){
       this.mem.stop=stop;
-      const nodes=[stopPad(currentStop),...(g.legs[stop]??[]),stopPad(nextStop)],goal=nodes.length-1,queue=[0],came=new Map<number,number>([[0,-1]]);
-      for(let q=0;q<queue.length&&!came.has(goal);q++)for(let j=1;j<nodes.length;j++)if(!came.has(j)&&model.possible(nodes[queue[q]],nodes[j],g instanceof LunarLeap?.74:.68)){came.set(j,queue[q]);queue.push(j);}
-      route=[];if(came.has(goal)){let j=goal;while(j>0){route.unshift(nodes[j]);j=came.get(j)!;}}this.mem.route=route;
+      const nodes=[new Pad(currentStop.x-1,currentStop.y,currentStop.z-1,3,3),...(g.legs[stop]??[]),goalPad],goal=nodes.length-1,queue=[0],came=new Map<number,number>([[0,-1]]);
+      for(let q=0;q<queue.length&&!came.has(goal);q++){
+        const u=queue[q];
+        for(let j=1;j<nodes.length;j++){
+          if(came.has(j))continue;
+          const from=u===0?edgePad(currentStop,nodes[j]):nodes[u],to=j===goal?edgePad(nextStop,nodes[u]):nodes[j];
+          if(model.possible(from,to,limit)){came.set(j,u);queue.push(j);}
+        }
+      }
+      route=[];if(came.has(goal)){let j=goal;while(j>0){route.unshift(j===goal?edgePad(nextStop,nodes[came.get(j)!]):nodes[j]);j=came.get(j)!;}}this.mem.route=route;
     }
     this.mem.lastX=p.x;this.mem.lastZ=p.z;
     let target=route[0];if(!target)return;
     if(b.onGround&&Math.abs(p.y-BASE_Y-target.y-1)<.3&&p.x>=target.x-.25&&p.x<target.x+target.w+.25&&p.z>=target.z-.25&&p.z<target.z+target.d+.25){route.shift();target=route[0];if(!target){this.walkTo(nextStop.x+.5,nextStop.z+.5,.3);return;}}
     const i=g.pads.indexOf(target);
-    if(g instanceof NeonBlink&&i>=0&&neonState(g.colours[i],g.t+12)===2&&b.onGround)return;
+    if(g instanceof NeonBlink&&i>=0&&b.onGround&&(neonState(g.colours[i],g.t+10)===2||neonState(g.colours[i],g.t+14)===2)){
+      const cur=g.pads.findIndex(q=>Math.abs(p.y-BASE_Y-q.y-1)<.3&&p.x>=q.x-.25&&p.x<q.x+q.w+.25&&p.z>=q.z-.25&&p.z<q.z+q.d+.25);
+      if(cur<0||(g.colours[cur]!==g.colours[i]&&neonState(g.colours[cur],g.t+6)!==2))return;
+    }
     this.jumpToward(target,model===JumpModel.MOON);
   }
   private jumpToward(target:Pad,moon=false):void {
@@ -458,7 +469,7 @@ export class MgBot {
       let edge=.2;
       while(edge<4&&BLOCKS[get(Math.floor(p.x+ux*edge),Math.floor(p.y-.1),Math.floor(p.z+uz*edge))]?.solid)edge+=.2;
       // Run up to the lip, then take off facing the landing pad.
-      if(edge<.35&&Math.abs(angleTo(b.yaw,Math.atan2(-(tx-p.x),-(tz-p.z))))<.2)this.input.jump=true;
+      if(edge<.45&&Math.abs(angleTo(b.yaw,Math.atan2(-(tx-p.x),-(tz-p.z))))<.2)this.input.jump=true;
     }else if(d<(moon?1.2:.6)){
       this.input.forward=false;this.input.sprintKey=false;
       // Ordinary countersteering is needed to settle on a small landing pad.
@@ -468,13 +479,14 @@ export class MgBot {
   }
   private lava(g:LavaClimb):void {
     const b=this.body,p=b.pos;
-    const route=g.layout.routes[this.id%3];let i=Number(this.mem.pad??0);
+    if(this.mem.lavaRoute===undefined){let best=0,bd=Infinity;g.layout.routes.forEach((r,k)=>{const d=Math.hypot(r[0].cx()-p.x,r[0].cz()-p.z);if(d<bd){bd=d;best=k;}});this.mem.lavaRoute=best;}
+    const route=g.layout.routes[Number(this.mem.lavaRoute)];let i=Number(this.mem.pad??0);
     // Find the furthest pad reached physically; never award progress to a bot.
     for(let j=i;j<route.length;j++){const pad=route[j];if(Math.abs(p.y-BASE_Y-pad.y-1)<.35&&pad.covers(Math.floor(p.x),Math.floor(p.z))&&b.onGround)i=j+1;}
     this.mem.pad=i;
     const target=route[i];if(!target){this.jumpToward(new Pad(-3,44,-3,7,7));return;}
     if(i>0&&route[i-1].ladderFoot&&target.y>route[i-1].y){
-      const foot=route[i-1];this.walkTo(foot.cx(),foot.cz(),.08);this.input.jump=true;this.input.forward=true;return;
+      this.walkTo(target.cx(),target.cz(),.08);this.input.jump=true;this.input.forward=true;return;
     }
     this.jumpToward(target);
   }

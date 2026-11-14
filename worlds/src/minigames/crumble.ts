@@ -3,13 +3,13 @@ import { JumpModel } from './parkour';
 import { sceneryCrumblingRuins } from './race_geometry';
 import { scaleInt } from '../minigames_rules';
 import { BASE_Y, type ArenaDef } from './arena';
-export const crumbleDelay=(n:number)=>scaleInt(n,14,22);
-export const regrow=(n:number)=>scaleInt(n,160,80);
+export const crumbleDelay=(n:number)=>scaleInt(n,22,32);
+export const regrow=(n:number)=>scaleInt(n,120,60);
 const STONES=['stone_bricks','mossy_stone_bricks','mossy_cobblestone','chiseled_stone_bricks','polished_andesite','mossy_stone_bricks'];
 export class CrumblingRuins extends ParkourRace {
   readonly id='crumble';readonly course;readonly arena:ArenaDef;readonly materials:string[]=[];
   readonly crumbling=new Map<number,number>();readonly gone=new Map<number,number>();
-  constructor(seed=0){super();this.course=generatedCourse(this.id,seed,131,{stops:6,radius:6,legMin:32,legMax:40,startY:22,dyMin:-3,dyMax:7,minY:14,maxY:66,extent:108,lanes:3,laneSpread:9,maxPads:30},{model:JumpModel.NORMAL,easiest:.36,hardest:.68,maxDrop:3,sizes:[1,2,2,2,3],wander:.35,below:3});
+  constructor(seed=0){super();this.course=generatedCourse(this.id,seed,131,{stops:6,radius:6,legMin:32,legMax:40,startY:22,dyMin:-3,dyMax:7,minY:14,maxY:66,extent:108,lanes:3,laneSpread:9,maxPads:40},{model:JumpModel.NORMAL,easiest:.25,hardest:.58,maxDrop:3,sizes:[2,2,2,3],wander:.35,below:3});
     // Material choices precede scenery in the source's shared course RNG.
     for(const _pad of this.pads)this.materials.push(STONES[this.course.rng.nextInt(STONES.length)]);
     this.arena={id:this.id,bounds:COURSE_BOX,build:d=>{this.pads.forEach((p,i)=>drawPad(d,p,this.materials[i]));sceneryCrumblingRuins(d,this.course);}};

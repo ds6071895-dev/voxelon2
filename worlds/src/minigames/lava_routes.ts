@@ -5,7 +5,7 @@ import { Pad,JumpModel,courseKey } from './parkour';
 export class LavaPad extends Pad {constructor(x:number,y:number,z:number,w:number,d:number,readonly ladderFoot:boolean){super(x,y,z,w,d);}}
 export interface Tower{x:number;z:number;facing:string;y0:number;y1:number}
 const cardinal=(x:number,z:number)=>Math.abs(x)>=Math.abs(z)?(x>0?E:W):(z>0?S:N);
-const CORE=4,CRATER=13,SUMMIT=44,ROUTES=3,JUMP_LIMIT=.72;
+const CORE=4,CRATER=13,SUMMIT=44,ROUTES=3,JUMP_LIMIT=.67;
 const inDisc=(x:number,z:number,r:number)=>x*x+z*z<=(r+.5)**2;
 const routeAngle=(route:number)=>route*Math.PI*2/3+.22;
 const gap=(a0:number,a1:number,b0:number,b1:number)=>Math.max(0,b0-a1-1,a0-b1-1);
@@ -68,9 +68,9 @@ const makeTower=(x:number,z:number,facing:string,y0:number,y1:number):Tower=>({x
             let reversed = false;
             for (let attempt = 0; attempt < 80 && next == null; attempt++) {
                 let dy = y >= SUMMIT - 1 ? 0 : r.nextDouble() < 0.72 ? 1 : 0;
-                let size = y < 14 ? 2 : r.nextDouble() < 0.4 ? 1 : 2;
+                let size = y < 14 ? 2 : r.nextDouble() < 0.2 ? 1 : 2;
                 let rad = finale ? 6.3 + r.nextDouble() * (y >= SUMMIT - 3 ? 0.9 : 2.2) : outer ? 9.2 + r.nextDouble() * 1.2 : 6.7 + r.nextDouble() * 0.9;
-                let step = 2.4 + r.nextDouble() * 1.3 + (size == 1 ? 0.3 : 0);
+                let step = 2.2 + r.nextDouble() * 1.2 + (size == 1 ? 0.2 : 0);
                 let flip = finale && r.nextDouble() < 0.3;
                 let a = angle + (flip ? -direction : direction) * step / rad;
                 let turn = !finale && (direction > 0 ? a > to : a < from) && path.length !== 0;
@@ -109,7 +109,7 @@ const makeTower=(x:number,z:number,facing:string,y0:number,y1:number):Tower=>({x
                 let gz = gap(previous.z, previous.z + previous.d - 1, candidate.z, candidate.z + candidate.d - 1);
                 let overlapX = candidate.x <= previous.x + previous.w - 1 && previous.x <= candidate.x + candidate.w - 1;
                 let overlapZ = candidate.z <= previous.z + previous.d - 1 && previous.z <= candidate.z + candidate.d - 1;
-                if (!fromFloor && (overlapX && overlapZ || !possible(gx, gz, dy, JUMP_LIMIT) || gx > 3 || gz > 3)) {
+                if (!fromFloor && (overlapX && overlapZ || !possible(gx, gz, dy, JUMP_LIMIT) || gx > 2 || gz > 2)) {
                     continue;
                 }
                 if (!free(candidate, used) || candidateTower != null && !towerFree(candidateTower, used)) {
